@@ -2,6 +2,7 @@
 //       file name:  j4_display_right
 //     v0_1 created:  2026-07-02 -- CDT -KL
 //     last updated:  2026-07-02 -- CDT
+//     last updated:  2026-07-04 -- CDT
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -10,9 +11,11 @@
 //                    VOLUME (left to right), each with a live value bar.
 //
 //                    The four pots are read by a dedicated ADS1115 on this
-//                    board's I2C bus (the controller's own two ADS1115s are out
-//                    of channels), and the raw readings are streamed to the TTGO
-//                    j4_controller over UART as an ASCII line at 25 Hz:
+//                    board's I2C bus (the fifth ADS1115 in the system -- the
+//                    controller's own four have their channels allocated to the
+//                    joysticks and face pots, plus spares for future pots), and
+//                    the raw readings are streamed to the TTGO j4_controller
+//                    over UART as an ASCII line at 25 Hz:
 //
 //                       "P:<iris>,<color>,<brightness>,<volume>\n"
 //
