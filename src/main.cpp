@@ -3,6 +3,7 @@
 //     v0_1 created:  2026-07-02 -- CDT -KL
 //     last updated:  2026-07-02 -- CDT
 //     last updated:  2026-07-04 -- CDT
+//     last updated:  2026-07-08 -- CDT (ADS1115 presence guard, no lockup when absent)
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -83,10 +84,31 @@
 
 
 // -----------------------------------------------------------------------------
-//  ADS1115 (dedicated to this board -- the controller's two are full).
+//  ADS1115 (dedicated to this board -- the system's fifth).
 //  Same gain/rate/mode as the controller's, so raw counts scale identically.
 // -----------------------------------------------------------------------------
 ADS1115 ADS(0x48);   // ADDR pin to GND
+
+// Presence guard: the ADS1X15 library's readADC() has NO timeout -- with no
+// chip on the bus isBusy() never clears and readADC() spins forever, freezing
+// loop(). The module must ACK right now before any read; it is (re)configured
+// whenever it (re)appears, so a hot-plugged ADS just starts working.
+bool ads_configured = false;
+
+bool adsReady() {
+  if (!ADS.isConnected()) {   // cheap 1-byte I2C probe
+    ads_configured = false;
+    return false;
+  }
+  if (!ads_configured) {
+    ADS.begin();
+    ADS.setGain(0);      // +/-6.144V -- same as the controller's ADS1115s
+    ADS.setDataRate(7);  // fast
+    ADS.setMode(1);      // single-shot
+    ads_configured = true;
+  }
+  return true;
+}
 
 #define CH_IRIS        0
 #define CH_COLOR       1
@@ -197,13 +219,12 @@ void setup() {
   Serial.begin(115200);
   Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX, LINK_TX);
 
-  // ADS1115 on the XIAO's native I2C pins (D4/D5 = GPIO5/6)
+  // ADS1115 on the XIAO's native I2C pins (D4/D5 = GPIO5/6). Probed via
+  // adsReady() before every read: the ADS1X15 library's readADC() has no
+  // timeout, so with no chip on the bus it would spin forever and freeze
+  // loop() (frozen screen, no pot feed). Absent module = zeros + re-probe.
   Wire.begin();
-  ADS.begin();
-  delay(10);
-  ADS.setGain(0);      // +/-6.144V -- same as the controller's ADS1115s
-  ADS.setDataRate(7);  // fast
-  ADS.setMode(1);      // single-shot
+  adsReady();
 
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
@@ -226,10 +247,14 @@ void loop() {
   if (now - potTx_previousMillis >= POT_TX_INTERVAL_MS) {
     potTx_previousMillis = now;
 
-    potRaw[CH_IRIS]       = ADS.readADC(CH_IRIS);
-    potRaw[CH_COLOR]      = ADS.readADC(CH_COLOR);
-    potRaw[CH_BRIGHTNESS] = ADS.readADC(CH_BRIGHTNESS);
-    potRaw[CH_VOLUME]     = ADS.readADC(CH_VOLUME);
+    if (adsReady()) {
+      potRaw[CH_IRIS]       = ADS.readADC(CH_IRIS);
+      potRaw[CH_COLOR]      = ADS.readADC(CH_COLOR);
+      potRaw[CH_BRIGHTNESS] = ADS.readADC(CH_BRIGHTNESS);
+      potRaw[CH_VOLUME]     = ADS.readADC(CH_VOLUME);
+    } else {
+      potRaw[CH_IRIS] = potRaw[CH_COLOR] = potRaw[CH_BRIGHTNESS] = potRaw[CH_VOLUME] = 0;
+    }
 
     // Raw counts upstream; the controller runs processPot() on them.
     Serial1.printf("P:%d,%d,%d,%d\n",
