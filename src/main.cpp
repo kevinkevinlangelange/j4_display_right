@@ -4,6 +4,7 @@
 //     last updated:  2026-07-02 -- CDT
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT (ADS1115 presence guard, no lockup when absent)
+//     last updated:  2026-07-08 -- CDT (cap I2C timeout + throttle re-probe of an absent ADS)
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -89,14 +90,27 @@
 // -----------------------------------------------------------------------------
 ADS1115 ADS(0x48);   // ADDR pin to GND
 
-// Presence guard: the ADS1X15 library's readADC() has NO timeout -- with no
-// chip on the bus isBusy() never clears and readADC() spins forever, freezing
-// loop(). The module must ACK right now before any read; it is (re)configured
-// whenever it (re)appears, so a hot-plugged ADS just starts working.
-bool ads_configured = false;
+// Presence guard, two traps when the module is missing:
+//  1. The ADS1X15 library's readADC() has NO timeout -- with no chip on the
+//     bus isBusy() never clears and readADC() spins forever, freezing loop().
+//  2. With the module absent the bus has no pull-ups (they are on the ADS
+//     breakout), so a probe doesn't fast-NACK; it eats the driver timeout +
+//     recovery. Wire.setTimeOut(10) caps that, and an absent module is only
+//     re-probed once per second. A present module ACKs in microseconds, so
+//     verifying it before every read costs nothing; hot-plugging just works.
+#define ADS_REPROBE_MS 1000
+bool          ads_configured = false;
+unsigned long ads_lastProbe  = 0;
+bool          ads_probedOnce = false;
 
 bool adsReady() {
-  if (!ADS.isConnected()) {   // cheap 1-byte I2C probe
+  if (!ads_configured) {
+    unsigned long now = millis();
+    if (ads_probedOnce && (now - ads_lastProbe < ADS_REPROBE_MS)) return false;
+    ads_probedOnce = true;
+    ads_lastProbe  = now;
+  }
+  if (!ADS.isConnected()) {   // 1-byte I2C probe
     ads_configured = false;
     return false;
   }
@@ -224,6 +238,7 @@ void setup() {
   // timeout, so with no chip on the bus it would spin forever and freeze
   // loop() (frozen screen, no pot feed). Absent module = zeros + re-probe.
   Wire.begin();
+  Wire.setTimeOut(10);   // cap dead-bus transactions (healthy ones take <1ms)
   adsReady();
 
   pinMode(TFT_BL, OUTPUT);
