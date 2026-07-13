@@ -66,6 +66,33 @@ LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
    The TTGO->XIAO direction (D7) is wired but unused; reserved for later.
 ```
 
+## ADS1115 pin diagrams
+
+The four pots under the screen, left to right as labeled on the display:
+IRIS, COLOR, BRIGHTNESS, VOLUME. Every pot's wiper goes to its A-pin; the
+outer legs go to 3.3V and GND (all four share the rails).
+
+```
+ADS1115 @ 0x48 (ADDR -> GND)                on the XIAO's own I2C bus
++------+
+| VDD  |  XIAO 3V3
+| GND  |  XIAO GND
+| SCL  |  XIAO D5 (GPIO 6)
+| SDA  |  XIAO D4 (GPIO 5)
+| ADDR |  GND  = address 0x48
+| ALRT |  not connected
+| A0   |  IRIS pot wiper        -> 270-deg iris servo (PCA9685 on j4_receiver)
+| A1   |  COLOR pot wiper       -> WS2812B strip color (j4_receiver)
+| A2   |  BRIGHTNESS pot wiper  -> WS2812B strip brightness (j4_receiver)
+| A3   |  VOLUME pot wiper      -> j4_talk audio volume
++------+
+```
+
+Raw counts stream to the TTGO as `P:<iris>,<color>,<brightness>,<volume>`
+lines at 25 Hz; the controller scales them with its standard `processPot()`.
+The IRIS pot shares its function with fader_right on the controller
+(last-mover-wins, see j4_controller).
+
 ## Wiring to TTGO controller
 
 3.3V logic on both sides -- no level shifter needed.
