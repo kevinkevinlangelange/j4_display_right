@@ -40,7 +40,7 @@ Where the pot values go from there:
 | D4 | GPIO5 | I2C SDA (ADS1115) |
 | D5 | GPIO6 | I2C SCL (ADS1115) |
 | D6 | GPIO43 | UART TX to TTGO GPIO26 |
-| D7 | GPIO44 | UART RX from TTGO GPIO25 (reserved, unused) |
+| D7 | GPIO44 | UART RX from TTGO GPIO25 (face-preset messages) |
 | D8 | GPIO7 | TFT SCLK |
 | D9 | GPIO8 | TFT MISO |
 | D10 | GPIO9 | TFT MOSI |
@@ -63,7 +63,7 @@ LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
               (GP43)        +-------------+
 
    D4/D5 are the XIAO's native I2C pins -- the ADS1115 hangs there (addr 0x48).
-   The TTGO->XIAO direction (D7) is wired but unused; reserved for later.
+   The TTGO->XIAO direction (D7) carries the face-preset messages (M:/X:).
 ```
 
 ## ADS1115 pin diagrams
@@ -100,7 +100,7 @@ The IRIS pot shares its function with fader_right on the controller
 | XIAO | TTGO |
 |------|------|
 | D6 (GPIO43) TX | GPIO26 RX |
-| D7 (GPIO44) RX | GPIO25 TX (reserved) |
+| D7 (GPIO44) RX | GPIO25 TX (face-preset messages) |
 | GND | GND |
 
 ## Wiring to ILI9488 display module
@@ -143,6 +143,15 @@ P:<iris>,<color>,<brightness>,<volume>\n
 
 Values are raw ADS1115 counts. The controller scales them (`processPot()`) and forwards: iris/color/brightness/volume ride the ESP-NOW control packet to j4_receiver, which drives the iris servo and the WS2812B strip and relays volume to j4_talk. Any received `P:` line also marks this board CONNECTED on the controller's connection-status screen.
 
+Downstream (TTGO to this board, on the previously-reserved direction), two line types drive the message band:
+
+```
+M:<line1>|<line2>\n    show a two-line message (face-preset save prompt, confirmations)
+X:\n                   clear it
+```
+
+Anything else is treated as line noise from a floating RX pin and ignored; the buffer is length-capped, and a message self-clears after 15 seconds in case the `X:` gets lost. Message timing is owned by the controller, so this board stays dumb and never blocks on the link.
+
 ## Display layout (480 x 320 landscape)
 
 ```
@@ -150,7 +159,7 @@ Values are raw ADS1115 counts. The controller scales them (`processPot()`) and f
 |                     KEVCO                      |  header (44px)
 +------------------------------------------------+  green line
 |                                                |
-|             (reserved for later)               |
+|      message band (face-preset prompts)        |
 |                                                |
 +------------------------------------------------+  dim line
 |  [bar]     [bar]      [bar]        [bar]       |  value bars (36px)

@@ -5,6 +5,14 @@
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT (ADS1115 presence guard, no lockup when absent)
 //     last updated:  2026-07-08 -- CDT (cap I2C timeout + throttle re-probe of an absent ADS)
+//     last updated:  2026-07-14 -- CDT (message overlay: the TTGO now talks back
+//                    on the previously-reserved RX direction. "M:<l1>|<l2>"
+//                    shows a two-line message in the middle band -- used for
+//                    the face-preset save prompt and confirmations -- and
+//                    "X:" clears it. Only those two line types are recognized
+//                    (floating-RX garbage is ignored), the buffer is capped,
+//                    and a stale message self-clears after 15s in case the
+//                    clear line is lost.)
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -36,8 +44,8 @@
 //      D4 / GPIO5   I2C SDA -- ADS1115 (addr 0x48, ADDR pin to GND)
 //      D5 / GPIO6   I2C SCL -- ADS1115
 //      D6 / GPIO43  LINK TX  →  TTGO GPIO26  (TTGO RX)
-//      D7 / GPIO44  LINK RX  ←  TTGO GPIO25  (TTGO TX, reserved -- nothing
-//                                             is sent this way yet)
+//      D7 / GPIO44  LINK RX  ←  TTGO GPIO25  (TTGO TX, face-preset messages:
+//                                             "M:<l1>|<l2>" show, "X:" clear)
 //      D8 / GPIO7   TFT SCLK
 //      D9 / GPIO8   TFT MISO
 //      D10 / GPIO9  TFT MOSI
@@ -56,7 +64,8 @@
 //      |                     KEVCO                      |  header (44px)
 //      +------------------------------------------------+  green line
 //      |                                                |
-//      |             (reserved for later)               |
+//      |    message band: face-preset prompts and       |
+//      |    confirmations from the controller           |
 //      |                                                |
 //      +------------------------------------------------+  dim line
 //      |  [bar]     [bar]      [bar]        [bar]       |  value bars (36px)
@@ -77,11 +86,17 @@
 // -----------------------------------------------------------------------------
 //  UART LINK (to the TTGO controller)
 // -----------------------------------------------------------------------------
-#define LINK_RX    44      // D7 receives from TTGO GPIO25 (reserved, unused)
+#define LINK_RX    44      // D7 receives from TTGO GPIO25 (face-preset messages)
 #define LINK_TX    43      // D6 sends to   TTGO GPIO26
 #define LINK_BAUD  115200
 
 #define POT_TX_INTERVAL_MS  40   // 25 Hz, matches the controller's control loop
+
+// Message overlay: "M:<line1>|<line2>" shows, "X:" clears. Anything else on
+// the link is ignored (a floating RX pin streams garbage when the TTGO is
+// unplugged). If the controller's "X:" is ever lost, the message self-clears.
+#define MSG_MAX_LEN          40   // per line, fits font 4 across the band
+#define MSG_SAFETY_CLEAR_MS  15000
 
 
 // -----------------------------------------------------------------------------
@@ -175,6 +190,13 @@ int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force 
 
 unsigned long potTx_previousMillis = 0;
 
+// Message overlay state
+char          msgLine1[MSG_MAX_LEN + 1] = "";
+char          msgLine2[MSG_MAX_LEN + 1] = "";
+bool          msgShown   = false;
+unsigned long msgShownAt = 0;
+String        linkBuf    = "";
+
 
 // -----------------------------------------------------------------------------
 //  DRAWING
@@ -216,12 +238,51 @@ void drawBar(uint8_t i) {
 }
 
 
+// Message band between the header and the bars: face-preset prompts and
+// confirmations sent by the controller.
+#define MSG_Y  (HDR_H + 2)
+#define MSG_H  (BAR_Y - 4 - MSG_Y)
+
+void drawMessage() {
+  tft.fillRect(0, MSG_Y, SCREEN_W, MSG_H, C_BG);
+  if (!msgShown) return;
+  int16_t cy = MSG_Y + MSG_H / 2;
+  tft.drawRect(20, MSG_Y + 12, SCREEN_W - 40, MSG_H - 24, C_GREEN);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_GREEN, C_BG);
+  tft.drawString(msgLine1, SCREEN_W / 2, cy - 26, 4);
+  tft.drawString(msgLine2, SCREEN_W / 2, cy + 26, 4);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// One complete line from the TTGO. Only "M:" and "X:" are real; everything
+// else is line noise from a floating RX pin and is dropped.
+void handleLinkLine(const String &line) {
+  if (line.startsWith("M:")) {
+    String body = line.substring(2);
+    int sep = body.indexOf('|');
+    String l1 = (sep >= 0) ? body.substring(0, sep) : body;
+    String l2 = (sep >= 0) ? body.substring(sep + 1) : "";
+    strncpy(msgLine1, l1.c_str(), MSG_MAX_LEN); msgLine1[MSG_MAX_LEN] = '\0';
+    strncpy(msgLine2, l2.c_str(), MSG_MAX_LEN); msgLine2[MSG_MAX_LEN] = '\0';
+    msgShown   = true;
+    msgShownAt = millis();
+    drawMessage();
+  } else if (line.startsWith("X:")) {
+    if (msgShown) {
+      msgShown = false;
+      drawMessage();
+    }
+  }
+}
+
 void drawScreen() {
   tft.fillScreen(C_BG);
   drawHeader();
   tft.drawFastHLine(0, HDR_H, SCREEN_W, C_GREEN);
   tft.drawFastHLine(0, BAR_Y - 2, SCREEN_W, C_DIM);
   drawLabels();
+  drawMessage();
   for (uint8_t i = 0; i < 4; i++) drawBar(i);
 }
 
@@ -258,6 +319,26 @@ void setup() {
 // -----------------------------------------------------------------------------
 void loop() {
   unsigned long now = millis();
+
+  // Messages from the TTGO (face-preset prompts/confirmations). Length guard
+  // caps floating-RX garbage; only recognized lines do anything.
+  while (Serial1.available()) {
+    char c = (char)Serial1.read();
+    if (c == '\n') {
+      linkBuf.trim();
+      if (linkBuf.length() > 0) handleLinkLine(linkBuf);
+      linkBuf = "";
+    } else if (c != '\r') {
+      if (linkBuf.length() > 96) linkBuf = "";
+      linkBuf += c;
+    }
+  }
+
+  // Self-clear a stale message in case the controller's "X:" got lost.
+  if (msgShown && now - msgShownAt >= MSG_SAFETY_CLEAR_MS) {
+    msgShown = false;
+    drawMessage();
+  }
 
   if (now - potTx_previousMillis >= POT_TX_INTERVAL_MS) {
     potTx_previousMillis = now;
