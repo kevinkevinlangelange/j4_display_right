@@ -195,6 +195,50 @@ pio device monitor
 
 If the upload fails, hold the **BOOT** button on the XIAO, tap **RESET**, then release BOOT to force download mode.
 
+## TFT bring-up diagnostic
+
+For when the panel is blank while the rest of the board works. TFT_eSPI writes are blind (no ack, and no readback in the init path), so a clean `tft.init()` proves only that the ESP32 shifted the bytes out, not that the panel accepted them. `src/diag/tft_diag.cpp` separates the questions that a blank screen leaves tangled.
+
+It is built by its own environments and excludes `src/main.cpp`, so it touches neither the ADS1115 nor the UART link and runs with the pots and the TTGO unplugged.
+
+```bash
+pio run -e diag-ili9488 --target upload    # then st7796, then ili9486
+pio device monitor
+```
+
+| Environment | Driver under test |
+|---|---|
+| `diag-ili9488` | ILI9488 (what the normal firmware assumes) |
+| `diag-st7796` | ST7796 |
+| `diag-ili9486` | ILI9486 |
+
+These red 480x320 modules ship as any of the three with identical silkscreen and identical pinout, and a driver mismatch gives a lit backlight over a blank panel. Flash each in turn: the one that paints identifies the glass.
+
+For the module currently fitted, the manufacturer's listing states ILI9488, `VCC power voltage: 3.3V~5V` and `Logic IO port voltage: 3.3V (TTL)`. So the panel supply is in spec on the XIAO's 3V3 rail, the logic lines connect to the XIAO directly with no shifter, and `diag-st7796` / `diag-ili9486` are insurance rather than the leading theory. There is no level shifter anywhere in the path: not external, and not on the module either, which the manufacturer's own note confirms by telling 5V users to add their own. The logic pins run straight from the XIAO to the ILI9488, which is the best case for signal integrity.
+
+That leaves the clock as a suspect on spec alone rather than on margin: the normal firmware runs `SPI_FREQUENCY=27000000`, above the ILI9488's ~20 MHz write spec, and the diagnostic drops it to 10 MHz to remove the variable.
+
+What it reports:
+
+- **Firmware heartbeat.** The XIAO's on-board user LED (GPIO21, active LOW) blinks at 2 Hz and the USB CDC port narrates every step. Both are independent of the TFT and of the backlight. This matters because if the display's `LED` pin is strapped to 3.3V rather than driven from D0, the backlight is on unconditionally and says nothing about firmware state.
+- **Compiled pin map**, so a pasted serial log is self-contained.
+- **ID readback** of `RDDID` (0x04) and `RDDST` (0x09) over MISO, which names the controller outright when SDO is wired and driven. Byte 3 of RDDID is 0x88 for ILI9488, 0x86 for ILI9486, 0x96 for ST7796. All 0x00 or all 0xFF means no usable readback, which is common on these modules and not a fault on its own.
+- **Solid floods** (red, green, blue, white, black) then a **colour bar and text frame**, cycling continuously. A panel blank through the floods is a different fault from floods that paint in the wrong colours.
+
+Interpreting the result, also printed to serial at the end of each cycle:
+
+| Symptom | Meaning |
+|---|---|
+| Nothing paints on any of the three drivers | Not a driver mismatch. Check CS/DC/RST/SCLK/MOSI continuity and the module supply |
+| Floods paint | That environment's driver is the correct one |
+| Colours swapped (RED floods blue) | Right driver, wrong colour order. Add `-DTFT_RGB_ORDER=TFT_BGR` or `TFT_RGB` |
+| Inverted or washed out | Try `-DTFT_INVERSION_ON` or `-DTFT_INVERSION_OFF` |
+| Intermittent, tearing, garbage | Clock too high. Raise `SPI_FREQUENCY` back gradually from 10 MHz |
+
+Once the panel is identified, carry the working driver and any colour-order or inversion flag into the `[env:xiao-esp32s3]` `build_flags`.
+
+Note on library configuration: TFT_eSPI here is configured entirely by `build_flags`, with no `User_Setup.h`. If those flags failed to reach the library's own translation units the library would silently fall back to its default driver and pins, which produces exactly this blank-panel symptom. They do reach it: the three diag environments build to three different binaries (285440, 287904 and 285360 bytes for ILI9488, ST7796 and ILI9486), which is only possible if `-D<driver>_DRIVER` is changing the compiled library. Worth re-checking with `md5sum .pio/build/diag-*/firmware.bin` after any PlatformIO or TFT_eSPI upgrade.
+
 ## Related projects
 
 - **[j4_controller](https://github.com/kevinkevinlangelange/j4_controller)** -- the TTGO T-Display this board streams pot data to
