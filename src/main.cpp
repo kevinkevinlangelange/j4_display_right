@@ -29,6 +29,10 @@
 //                                    value and switches to the pot only when the pot is
 //                                    actually moved, so the bar always shows whichever
 //                                    source was adjusted most recently.
+//                    2026-09-02 -KL  Value bars now composed in a TFT_eSprite and pushed
+//                                    in one transaction, to stop the tearing seen when a
+//                                    pot is swept fast. Falls back to direct drawing if
+//                                    the sprite cannot be allocated.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -217,6 +221,14 @@ const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 // -----------------------------------------------------------------------------
 TFT_eSPI tft = TFT_eSPI();
 
+// One reusable off-screen buffer for the value bars, the size of a single bar
+// (84 x 20 at 16bpp, about 3.4KB). A bar is composed here and pushed in one
+// transaction so its outline, green fill and cleared remainder reach the panel
+// together. Drawn straight to the glass they are three separate writes, and a
+// fast pot sweep catches the panel part-way through, which is the tearing.
+TFT_eSprite barSpr   = TFT_eSprite(&tft);
+bool        barSprOk = false;   // false = allocation failed, draw direct
+
 int16_t potRaw[4]  = { 0, 0, 0, 0 };
 int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force draw)
 
@@ -279,11 +291,21 @@ void drawBar(uint8_t i) {
   if (px == potBarPx[i]) return;   // unchanged -- skip the redraw
   potBarPx[i] = px;
 
-  int16_t x = i * CELL_W + BAR_PAD;
-  tft.drawRect(x, BAR_Y + 8, BAR_INNER, BAR_H - 16, C_DIM);
-  tft.fillRect(x + 2, BAR_Y + 10, px > BAR_INNER - 4 ? BAR_INNER - 4 : px,
-               BAR_H - 20, C_GREEN);
-  tft.fillRect(x + 2 + px, BAR_Y + 10, BAR_INNER - 4 - px, BAR_H - 20, C_BG);
+  int16_t x    = i * CELL_W + BAR_PAD;
+  int16_t fill = px > BAR_INNER - 4 ? BAR_INNER - 4 : px;
+
+  if (barSprOk) {
+    barSpr.fillSprite(C_BG);
+    barSpr.drawRect(0, 0, BAR_INNER, BAR_H - 16, C_DIM);
+    barSpr.fillRect(2, 2, fill, BAR_H - 20, C_GREEN);
+    barSpr.pushSprite(x, BAR_Y + 8);
+  } else {
+    // Sprite allocation failed. Draw straight to the panel: it tears on a fast
+    // sweep, but the display stays usable rather than going blank.
+    tft.drawRect(x, BAR_Y + 8, BAR_INNER, BAR_H - 16, C_DIM);
+    tft.fillRect(x + 2, BAR_Y + 10, fill, BAR_H - 20, C_GREEN);
+    tft.fillRect(x + 2 + px, BAR_Y + 10, BAR_INNER - 4 - px, BAR_H - 20, C_BG);
+  }
 }
 
 
@@ -373,6 +395,14 @@ void setup() {
   tft.setRotation(3);    // landscape 480x320; change to 1 if upside down
   tft.fillScreen(C_BG);
   tft.setSwapBytes(true);
+
+  // Must come after tft.init(). createSprite() returns NULL if the allocation
+  // fails, in which case drawBar() falls back to drawing direct.
+  barSpr.setColorDepth(16);
+  barSprOk = (barSpr.createSprite(BAR_INNER, BAR_H - 16) != NULL);
+  Serial.printf("bar sprite %s (%d x %d)\n",
+                barSprOk ? "ready" : "FAILED, drawing direct",
+                BAR_INNER, BAR_H - 16);
 
   drawScreen();
 }

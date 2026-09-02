@@ -174,6 +174,8 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 +------------------------------------------------+  y=320
 ```
 
+The four value bars are composed in a single reusable `TFT_eSprite` (84 x 20 at 16bpp, about 3.4KB, one bar at a time) and pushed in one transaction. Drawn straight to the panel a bar is three separate writes, outline then green fill then cleared remainder, and sweeping a pot fast catches the display part-way through them as visible tearing. If `createSprite()` ever fails the code falls back to direct drawing, which tears but keeps the display usable.
+
 Each label cell is a quarter of the screen width, centered above its pot. If the image is upside down relative to the panel, change `setRotation(1)` to `setRotation(3)` in `main.cpp`.
 
 ## Dependencies
