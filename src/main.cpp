@@ -17,6 +17,11 @@
 //                    2026-09-02 -KL  Pot labels dropped from font 4 to font 2. "BRIGHTNESS"
 //                                    is 157px in font 4 against a 120px cell, so it ran over
 //                                    COLOR and VOLUME. Font 2 puts it at 76px.
+//                    2026-09-02 -KL  IRIS bar now follows the controller's arbitrated
+//                                    "I:<0-255>" value while that feed is fresh, so it
+//                                    tracks fader_right when fader_right is the last
+//                                    thing moved. Falls back to the local pot after
+//                                    500ms of silence. Needs j4_controller v0_6_38.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -152,6 +157,16 @@ bool adsReady() {
 // a 3.3V pot on a gain-0 ADS1115 tops out around 17000 counts).
 #define POT_RAW_MAX  17000
 
+// Arbitrated IRIS value from the controller ("I:<0-255>"). The IRIS pot below
+// this screen and fader_right on the controller are a last-mover-wins pair,
+// and dualPick() over there is the only place that result exists, so the bar
+// has to be told rather than derive it. While the feed is fresh the IRIS bar
+// draws this instead of the local pot, which is what makes the bar follow
+// fader_right. If the controller goes quiet the bar falls back to this board's
+// own pot, so the display still works standalone.
+#define IRIS_LINK_MAX         255
+#define IRIS_LINK_TIMEOUT_MS  500   // 12 missed frames at the controller's 25 Hz
+
 
 // -----------------------------------------------------------------------------
 //  COLOR PALETTE (matches j4_display_left)
@@ -192,6 +207,11 @@ TFT_eSPI tft = TFT_eSPI();
 int16_t potRaw[4]  = { 0, 0, 0, 0 };
 int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force draw)
 
+// Arbitrated iris from the controller, and whether that feed is still fresh.
+int           irisLink    = 0;
+bool          irisLinkOk  = false;
+unsigned long irisLinkAt  = 0;
+
 unsigned long potTx_previousMillis = 0;
 
 // Message overlay state
@@ -230,7 +250,15 @@ void drawLabels() {
 
 // One pot's live value bar: green fill proportional to the raw reading.
 void drawBar(uint8_t i) {
-  int16_t px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
+  // IRIS follows the controller's arbitrated value while that feed is fresh,
+  // so the bar tracks fader_right when fader_right is the active source. Every
+  // other channel, and IRIS with the controller absent, draws the local pot.
+  int16_t px;
+  if (i == CH_IRIS && irisLinkOk) {
+    px = (int32_t)constrain(irisLink, 0, IRIS_LINK_MAX) * BAR_INNER / IRIS_LINK_MAX;
+  } else {
+    px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
+  }
   if (px == potBarPx[i]) return;   // unchanged -- skip the redraw
   potBarPx[i] = px;
 
@@ -259,8 +287,8 @@ void drawMessage() {
   tft.setTextDatum(TL_DATUM);
 }
 
-// One complete line from the TTGO. Only "M:" and "X:" are real; everything
-// else is line noise from a floating RX pin and is dropped.
+// One complete line from the TTGO. Only "M:", "X:" and "I:" are real;
+// everything else is line noise from a floating RX pin and is dropped.
 void handleLinkLine(const String &line) {
   if (line.startsWith("M:")) {
     String body = line.substring(2);
@@ -276,6 +304,21 @@ void handleLinkLine(const String &line) {
     if (msgShown) {
       msgShown = false;
       drawMessage();
+    }
+  } else if (line.startsWith("I:")) {
+    // Digits only, 1 to 3 of them, in range. toInt() alone would read garbage
+    // off a floating RX pin as 0 and slam the bar shut once per noise burst.
+    String body = line.substring(2);
+    if (body.length() >= 1 && body.length() <= 3) {
+      bool digits = true;
+      for (uint16_t k = 0; k < body.length(); k++)
+        if (!isDigit(body[k])) { digits = false; break; }
+      long v = digits ? body.toInt() : -1;
+      if (v >= 0 && v <= IRIS_LINK_MAX) {
+        irisLink   = (int)v;
+        irisLinkOk = true;
+        irisLinkAt = millis();
+      }
     }
   }
 }
@@ -343,6 +386,9 @@ void loop() {
     msgShown = false;
     drawMessage();
   }
+
+  // Controller gone quiet: drop back to drawing the local IRIS pot.
+  if (irisLinkOk && now - irisLinkAt >= IRIS_LINK_TIMEOUT_MS) irisLinkOk = false;
 
   if (now - potTx_previousMillis >= POT_TX_INTERVAL_MS) {
     potTx_previousMillis = now;
