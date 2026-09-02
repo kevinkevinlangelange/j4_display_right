@@ -22,6 +22,8 @@
 //                                    tracks fader_right when fader_right is the last
 //                                    thing moved. Falls back to the local pot after
 //                                    500ms of silence. Needs j4_controller v0_6_38.
+//                    2026-09-02 -KL  SPI clock 10Mhz -> 20Mhz, the top of the ILI9488's
+//                                    write spec. Drop back to 10Mhz if the panel glitches.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
