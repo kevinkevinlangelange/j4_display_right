@@ -1,18 +1,22 @@
 //******************************************************************************
 //       file name:  j4_display_right
-//     v0_1 created:  2026-07-02 -- CDT -KL
-//     last updated:  2026-07-02 -- CDT
-//     last updated:  2026-07-04 -- CDT
-//     last updated:  2026-07-08 -- CDT (ADS1115 presence guard, no lockup when absent)
-//     last updated:  2026-07-08 -- CDT (cap I2C timeout + throttle re-probe of an absent ADS)
-//     last updated:  2026-07-14 -- CDT (message overlay: the TTGO now talks back
-//                    on the previously-reserved RX direction. "M:<l1>|<l2>"
-//                    shows a two-line message in the middle band -- used for
-//                    the face-preset save prompt and confirmations -- and
-//                    "X:" clears it. Only those two line types are recognized
-//                    (floating-RX garbage is ignored), the buffer is capped,
-//                    and a stale message self-clears after 15s in case the
-//                    clear line is lost.)
+//     v0_1 created:  2026-07-02 -KL
+//       update log:  2026-07-02 -KL
+//                    2026-07-04 -KL  (initial working version, 25Hz pot feed, bars, labels, message overlay)
+//                    2026-07-08 -KL  (ADS1115 presence guard, no lockup when absent)
+//                    2026-07-08 -KL  (cap I2C timeout + throttle re-probe of an absent ADS)
+//                    2026-07-14 -KL  (message overlay: the TTGO now talks back
+//                                    on the previously-reserved RX direction. "M:<l1>|<l2>"
+//                                    shows a two-line message in the middle band -- used for
+//                                    the face-preset save prompt and confirmations -- and
+//                                    "X:" clears it. Only those two line types are recognized
+//                                    (floating-RX garbage is ignored), the buffer is capped,
+//                                    and a stale message self-clears after 15s in case the
+//                                    clear line is lost.)
+//                    2026-09-02 -KL  Changed the frequency from 27Mhz to 10Mhz made the screen work
+//                    2026-09-02 -KL  Pot labels dropped from font 4 to font 2. "BRIGHTNESS"
+//                                    is 157px in font 4 against a 120px cell, so it ran over
+//                                    COLOR and VOLUME. Font 2 puts it at 76px.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -217,7 +221,7 @@ void drawLabels() {
   for (uint8_t i = 0; i < 4; i++) {
     int16_t cx = i * CELL_W + CELL_W / 2;
     tft.setTextColor(C_GREEN, C_BG);
-    tft.drawString(POT_LABELS[i], cx, LBL_Y + LBL_H / 2, 4);
+    tft.drawString(POT_LABELS[i], cx, LBL_Y + LBL_H / 2, 2);
     if (i > 0) tft.drawFastVLine(i * CELL_W, LBL_Y + 6, LBL_H - 12, C_DIM);
   }
   tft.setTextDatum(TL_DATUM);
@@ -306,7 +310,7 @@ void setup() {
   digitalWrite(TFT_BL, HIGH);
 
   tft.init();
-  tft.setRotation(1);    // landscape 480x320; change to 3 if upside down
+  tft.setRotation(3);    // landscape 480x320; change to 1 if upside down
   tft.fillScreen(C_BG);
   tft.setSwapBytes(true);
 
