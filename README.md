@@ -148,7 +148,14 @@ Downstream (TTGO to this board, on the previously-reserved direction), two line 
 ```
 M:<line1>|<line2>\n    show a two-line message (face-preset save prompt, confirmations)
 X:\n                   clear it
+I:<0-255>\n            the controller's arbitrated iris value, for the IRIS bar
 ```
+
+`I:` exists because the IRIS bar sits above the IRIS pot but that pot is only half a last-mover-wins pair: `fader_right` is on the controller, and its `dualPick()` is the only place the winner is known. Drawing the local pot alone would leave the bar sitting still whenever `fader_right` was the active source. The controller sends it at 25 Hz, after its face-preset overlay, so a recalled face reaches the bar too.
+
+The bar shows whichever source moved last, including with the controller unplugged. While the `I:` feed is live the controller owns the channel and the bar draws its value. Once the feed goes quiet the bar **holds** that value rather than reverting, and switches to the local pot only when the pot is physically moved past `IRIS_TAKEOVER_RAW` (270 counts, which is the controller's `DUAL_CLAIM_COUNTS` of 4/255 expressed in raw counts). The baseline freezes when the feed stops, so a slow turn still claims the channel, matching `dualPick()`'s frozen-baseline takeover.
+
+The upstream `P:` feed still carries this board's own raw IRIS count unchanged. That is what the controller arbitrates against, so it has to keep flowing regardless of what the bar is drawing.
 
 Anything else is treated as line noise from a floating RX pin and ignored; the buffer is length-capped, and a message self-clears after 15 seconds in case the `X:` gets lost. Message timing is owned by the controller, so this board stays dumb and never blocks on the link.
 

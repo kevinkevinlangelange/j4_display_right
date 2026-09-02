@@ -24,6 +24,11 @@
 //                                    500ms of silence. Needs j4_controller v0_6_38.
 //                    2026-09-02 -KL  SPI clock 10Mhz -> 20Mhz, the top of the ILI9488's
 //                                    write spec. Drop back to 10Mhz if the panel glitches.
+//                    2026-09-02 -KL  IRIS bar no longer reverts to the local pot when the
+//                                    controller goes quiet. It holds the last arbitrated
+//                                    value and switches to the pot only when the pot is
+//                                    actually moved, so the bar always shows whichever
+//                                    source was adjusted most recently.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -167,7 +172,13 @@ bool adsReady() {
 // fader_right. If the controller goes quiet the bar falls back to this board's
 // own pot, so the display still works standalone.
 #define IRIS_LINK_MAX         255
-#define IRIS_LINK_TIMEOUT_MS  500   // 12 missed frames at the controller's 25 Hz
+#define IRIS_LINK_SILENT_MS   500   // 12 missed frames at the controller's 25 Hz
+// Local-pot takeover once the controller has gone quiet. The bar holds the
+// last arbitrated value until this pot itself moves, rather than snapping back
+// to it, so "whichever moved last" still holds with the controller unplugged.
+// 270 raw counts is DUAL_CLAIM_COUNTS (4 on the controller's 0-255 scale)
+// expressed in this board's raw counts: 4 / 255 * 17000.
+#define IRIS_TAKEOVER_RAW     270
 
 
 // -----------------------------------------------------------------------------
@@ -209,10 +220,13 @@ TFT_eSPI tft = TFT_eSPI();
 int16_t potRaw[4]  = { 0, 0, 0, 0 };
 int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force draw)
 
-// Arbitrated iris from the controller, and whether that feed is still fresh.
+// Arbitrated iris from the controller. irisHold means the bar is showing that
+// value rather than the local pot; it is set by an "I:" line and cleared only
+// when the local pot moves after the controller has gone quiet.
 int           irisLink    = 0;
-bool          irisLinkOk  = false;
+bool          irisHold    = false;
 unsigned long irisLinkAt  = 0;
+int16_t       irisPotBase = 0;      // local raw at the moment the link went quiet
 
 unsigned long potTx_previousMillis = 0;
 
@@ -252,11 +266,12 @@ void drawLabels() {
 
 // One pot's live value bar: green fill proportional to the raw reading.
 void drawBar(uint8_t i) {
-  // IRIS follows the controller's arbitrated value while that feed is fresh,
-  // so the bar tracks fader_right when fader_right is the active source. Every
-  // other channel, and IRIS with the controller absent, draws the local pot.
+  // IRIS shows whichever source moved last. While the controller is streaming
+  // that is its arbitrated value, which is how the bar tracks fader_right. If
+  // the controller goes quiet the bar holds that value until this board's own
+  // pot moves, and only then switches to it. Every other channel is local.
   int16_t px;
-  if (i == CH_IRIS && irisLinkOk) {
+  if (i == CH_IRIS && irisHold) {
     px = (int32_t)constrain(irisLink, 0, IRIS_LINK_MAX) * BAR_INNER / IRIS_LINK_MAX;
   } else {
     px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
@@ -318,7 +333,7 @@ void handleLinkLine(const String &line) {
       long v = digits ? body.toInt() : -1;
       if (v >= 0 && v <= IRIS_LINK_MAX) {
         irisLink   = (int)v;
-        irisLinkOk = true;
+        irisHold   = true;
         irisLinkAt = millis();
       }
     }
@@ -389,8 +404,6 @@ void loop() {
     drawMessage();
   }
 
-  // Controller gone quiet: drop back to drawing the local IRIS pot.
-  if (irisLinkOk && now - irisLinkAt >= IRIS_LINK_TIMEOUT_MS) irisLinkOk = false;
 
   if (now - potTx_previousMillis >= POT_TX_INTERVAL_MS) {
     potTx_previousMillis = now;
@@ -402,6 +415,22 @@ void loop() {
       potRaw[CH_VOLUME]     = ADS.readADC(CH_VOLUME);
     } else {
       potRaw[CH_IRIS] = potRaw[CH_COLOR] = potRaw[CH_BRIGHTNESS] = potRaw[CH_VOLUME] = 0;
+    }
+
+    // IRIS ownership. While the controller is streaming it owns the channel
+    // (its dualPick() already arbitrates this pot against fader_right), so
+    // just track the pot to keep the takeover baseline current. Once the
+    // stream stops the baseline freezes and the bar keeps showing the last
+    // arbitrated value, which is still the most recent adjustment, until this
+    // pot is physically moved past the threshold. Measuring against a frozen
+    // baseline rather than the previous sample means a slow turn still claims
+    // the channel, same as dualPick() on the controller.
+    if (irisHold) {
+      if (now - irisLinkAt < IRIS_LINK_SILENT_MS) {
+        irisPotBase = potRaw[CH_IRIS];
+      } else if (abs(potRaw[CH_IRIS] - irisPotBase) > IRIS_TAKEOVER_RAW) {
+        irisHold = false;
+      }
     }
 
     // Raw counts upstream; the controller runs processPot() on them.
