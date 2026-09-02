@@ -174,7 +174,15 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 +------------------------------------------------+  y=320
 ```
 
-The four value bars are composed in a single reusable `TFT_eSprite` (84 x 20 at 16bpp, about 3.4KB, one bar at a time) and pushed in one transaction. Drawn straight to the panel a bar is three separate writes, outline then green fill then cleared remainder, and sweeping a pot fast catches the display part-way through them as visible tearing. If `createSprite()` ever fails the code falls back to direct drawing, which tears but keeps the display usable.
+The bar band is the only part of the screen that animates, and it is rendered through a single `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB) holding all four bars. Nothing is ever composed on the glass.
+
+Sizing that canvas to the band rather than the whole screen is deliberate, and so is pushing only part of it. The ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit and sends it through a per-pixel CPU loop (`pushPixels()` in `Processors/TFT_eSPI_ESP32_S3.c`), and the library's own README lists **ILI9488 (DMA not supported with SPI)**. Push cost is therefore strictly proportional to pixels sent, with no DMA to hide it, and the window in which the panel can be caught mid-update *is* the push duration. Pushing a whole-screen sprite every frame would lengthen that window, not shorten it.
+
+So each frame composes into the canvas and then pushes only the columns between the old and new fill edge. A pot sweep moves that edge a few pixels per frame, making a typical update a sliver of roughly 15 x 16 instead of the full 84 x 20 bar: about a sixth of the bytes, and a tear window that shrinks in proportion.
+
+Pushes are wrapped in `startWrite()`/`endWrite()`. The windowed `pushSprite()` renders line by line, and unlike its 1bpp and 4bpp branches its 16bpp branch does not bracket that loop itself, so without the wrapper each row would become its own SPI transaction with its own window command.
+
+If `createSprite()` ever fails, `drawBar()` falls back to drawing direct, which tears but keeps the display usable. Setup prints the sprite status over USB CDC.
 
 Each label cell is a quarter of the screen width, centered above its pot. If the image is upside down relative to the panel, change `setRotation(1)` to `setRotation(3)` in `main.cpp`.
 

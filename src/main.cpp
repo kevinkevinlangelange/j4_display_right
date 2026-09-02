@@ -33,6 +33,15 @@
 //                                    in one transaction, to stop the tearing seen when a
 //                                    pot is swept fast. Falls back to direct drawing if
 //                                    the sprite cannot be allocated.
+//                    2026-09-02 -KL  Bars reworked again: one 480x20 sprite holds the
+//                                    whole band, and only the columns between the old
+//                                    and new fill edge are pushed. The ILI9488 has no
+//                                    DMA on SPI and converts every pixel to 18-bit in a
+//                                    CPU loop, so the tear window is the push duration
+//                                    and the fix is sending fewer pixels, not more.
+//                                    Pushes are wrapped in startWrite/endWrite because
+//                                    the windowed pushSprite does not bracket its own
+//                                    line loop at 16bpp.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -213,6 +222,13 @@ bool adsReady() {
 #define BAR_PAD    18                        // bar inset from the cell edges
 #define BAR_INNER  (CELL_W - 2 * BAR_PAD)    // drawable bar width
 
+// The bar band: the only part of the screen that animates. One sprite spans
+// all four bars so they share a single canvas, and pushes come out of it.
+#define BAR_BAND_Y  (BAR_Y + 8)              // band top on the panel
+#define BAR_BAND_H  (BAR_H - 16)             // 20px, outline included
+#define BAR_FILL_Y  2                        // fill inset inside the band
+#define BAR_FILL_H  (BAR_H - 20)             // 16px of green/background
+
 const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 
 
@@ -221,13 +237,19 @@ const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 // -----------------------------------------------------------------------------
 TFT_eSPI tft = TFT_eSPI();
 
-// One reusable off-screen buffer for the value bars, the size of a single bar
-// (84 x 20 at 16bpp, about 3.4KB). A bar is composed here and pushed in one
-// transaction so its outline, green fill and cleared remainder reach the panel
-// together. Drawn straight to the glass they are three separate writes, and a
-// fast pot sweep catches the panel part-way through, which is the tearing.
-TFT_eSprite barSpr   = TFT_eSprite(&tft);
-bool        barSprOk = false;   // false = allocation failed, draw direct
+// Off-screen canvas for the whole bar band (480 x 20 at 16bpp, 19.2KB). All
+// four bars live in it, so nothing is ever composed on the glass itself.
+//
+// Sizing this to the band rather than to the whole screen is deliberate. The
+// ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit
+// and pushes it through a per-pixel CPU loop (pushPixels() in
+// Processors/TFT_eSPI_ESP32_S3.c), and the library's own README lists
+// "ILI9488 (DMA not supported with SPI)". Push cost is therefore strictly
+// proportional to pixels sent, with nothing to hide it behind, and the window
+// in which the panel can be caught mid-update IS the push duration. Pushing a
+// whole-screen sprite every frame would make the tearing worse, not better.
+TFT_eSprite barBand   = TFT_eSprite(&tft);
+bool        barBandOk = false;   // false = allocation failed, draw direct
 
 int16_t potRaw[4]  = { 0, 0, 0, 0 };
 int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force draw)
@@ -276,36 +298,70 @@ void drawLabels() {
 }
 
 
-// One pot's live value bar: green fill proportional to the raw reading.
-void drawBar(uint8_t i) {
-  // IRIS shows whichever source moved last. While the controller is streaming
-  // that is its arbitrated value, which is how the bar tracks fader_right. If
-  // the controller goes quiet the bar holds that value until this board's own
-  // pot moves, and only then switches to it. Every other channel is local.
-  int16_t px;
-  if (i == CH_IRIS && irisHold) {
+// Fill width for one channel, already clamped to what a bar can show.
+// IRIS shows whichever source moved last: the controller's arbitrated value
+// while it is streaming, which is how the bar tracks fader_right, otherwise
+// the local pot. Every other channel is always local.
+static int16_t barFillPx(uint8_t i) {
+  int32_t px;
+  if (i == CH_IRIS && irisHold)
     px = (int32_t)constrain(irisLink, 0, IRIS_LINK_MAX) * BAR_INNER / IRIS_LINK_MAX;
-  } else {
+  else
     px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
+  return (int16_t)constrain(px, 0, BAR_INNER - 4);
+}
+
+
+// One pot's live value bar.
+//
+// The bar is composed in the band sprite and only the columns that actually
+// changed are pushed to the panel. Sweeping a pot moves the fill edge a few
+// pixels per frame, so a typical update is a sliver maybe 15 x 16 rather than
+// the whole 84 x 20 bar: about a sixth of the bytes, and the tear window
+// shrinks with it. Repainting the entire bar every frame is what was still
+// tearing, because on this panel every pushed pixel is CPU-clocked out.
+//
+// force redraws the bar complete, outline included. Used for the first paint.
+void drawBar(uint8_t i, bool force = false) {
+  int16_t fill = barFillPx(i);
+  int16_t prev = potBarPx[i];
+  if (!force && fill == prev) return;   // unchanged, nothing to send
+  potBarPx[i] = fill;
+
+  int16_t bx = i * CELL_W + BAR_PAD;    // bar origin, same x on panel and band
+
+  if (!barBandOk) {
+    // Sprite allocation failed. Draw straight to the panel: it tears, but the
+    // display stays usable rather than going blank.
+    tft.drawRect(bx, BAR_BAND_Y, BAR_INNER, BAR_BAND_H, C_DIM);
+    tft.fillRect(bx + 2, BAR_BAND_Y + BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
+    tft.fillRect(bx + 2 + fill, BAR_BAND_Y + BAR_FILL_Y,
+                 BAR_INNER - 4 - fill, BAR_FILL_H, C_BG);
+    return;
   }
-  if (px == potBarPx[i]) return;   // unchanged -- skip the redraw
-  potBarPx[i] = px;
 
-  int16_t x    = i * CELL_W + BAR_PAD;
-  int16_t fill = px > BAR_INNER - 4 ? BAR_INNER - 4 : px;
+  // Compose into the canvas. No panel traffic in this part.
+  barBand.fillRect(bx + 2, BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
+  barBand.fillRect(bx + 2 + fill, BAR_FILL_Y,
+                   BAR_INNER - 4 - fill, BAR_FILL_H, C_BG);
 
-  if (barSprOk) {
-    barSpr.fillSprite(C_BG);
-    barSpr.drawRect(0, 0, BAR_INNER, BAR_H - 16, C_DIM);
-    barSpr.fillRect(2, 2, fill, BAR_H - 20, C_GREEN);
-    barSpr.pushSprite(x, BAR_Y + 8);
+  // startWrite()/endWrite() wrap every push. The windowed pushSprite() renders
+  // line by line and, unlike its 1bpp and 4bpp branches, its 16bpp branch does
+  // not bracket that loop itself (Extensions/Sprite.cpp), so without this each
+  // row would be its own SPI transaction with its own window command.
+  tft.startWrite();
+  if (force || prev < 0) {
+    barBand.drawRect(bx, 0, BAR_INNER, BAR_BAND_H, C_DIM);
+    barBand.pushSprite(bx, BAR_BAND_Y, bx, 0, BAR_INNER, BAR_BAND_H);
   } else {
-    // Sprite allocation failed. Draw straight to the panel: it tears on a fast
-    // sweep, but the display stays usable rather than going blank.
-    tft.drawRect(x, BAR_Y + 8, BAR_INNER, BAR_H - 16, C_DIM);
-    tft.fillRect(x + 2, BAR_Y + 10, fill, BAR_H - 20, C_GREEN);
-    tft.fillRect(x + 2 + px, BAR_Y + 10, BAR_INNER - 4 - px, BAR_H - 20, C_BG);
+    // Only the columns between the old and new fill edges differ. The outline
+    // is static and sits outside the fill rows, so it never needs resending.
+    int16_t lo = prev < fill ? prev : fill;
+    int16_t hi = prev < fill ? fill : prev;
+    barBand.pushSprite(bx + 2 + lo, BAR_BAND_Y + BAR_FILL_Y,
+                       bx + 2 + lo, BAR_FILL_Y, hi - lo, BAR_FILL_H);
   }
+  tft.endWrite();
 }
 
 
@@ -369,7 +425,7 @@ void drawScreen() {
   tft.drawFastHLine(0, BAR_Y - 2, SCREEN_W, C_DIM);
   drawLabels();
   drawMessage();
-  for (uint8_t i = 0; i < 4; i++) drawBar(i);
+  for (uint8_t i = 0; i < 4; i++) drawBar(i, true);
 }
 
 
@@ -398,11 +454,12 @@ void setup() {
 
   // Must come after tft.init(). createSprite() returns NULL if the allocation
   // fails, in which case drawBar() falls back to drawing direct.
-  barSpr.setColorDepth(16);
-  barSprOk = (barSpr.createSprite(BAR_INNER, BAR_H - 16) != NULL);
-  Serial.printf("bar sprite %s (%d x %d)\n",
-                barSprOk ? "ready" : "FAILED, drawing direct",
-                BAR_INNER, BAR_H - 16);
+  barBand.setColorDepth(16);
+  barBandOk = (barBand.createSprite(SCREEN_W, BAR_BAND_H) != NULL);
+  if (barBandOk) barBand.fillSprite(C_BG);
+  Serial.printf("bar band sprite %s (%d x %d, %d bytes)\n",
+                barBandOk ? "ready" : "FAILED, drawing direct",
+                SCREEN_W, BAR_BAND_H, SCREEN_W * BAR_BAND_H * 2);
 
   drawScreen();
 }
