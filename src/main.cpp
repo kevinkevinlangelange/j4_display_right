@@ -50,6 +50,11 @@
 //                                    drawn transparent. Guarded by __has_include, so the
 //                                    project still builds and behaves as before until the
 //                                    header is generated.
+//                    2026-09-02 -KL  Generated src/bg_image.h from bgscrn_w.png and
+//                                    committed it, so the background is live. Verified by
+//                                    decoding the generated array back to a bitmap and
+//                                    diffing against the source PNG: max per-channel error
+//                                    5, which is RGB565 quantisation and nothing else.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -512,6 +517,9 @@ void setup() {
 
   tft.init();
   tft.setRotation(3);    // landscape 480x320; change to 1 if upside down
+  // One-off clear of the panel's power-on garbage. drawScreen() paints the
+  // background image over all of this at the end of setup, so this is a boot
+  // frame only and never covers the image during operation.
   tft.fillScreen(C_BG);
   tft.setSwapBytes(true);
 
@@ -523,8 +531,11 @@ void setup() {
     // swapBytes false so pushImage into the sprite is a straight per-row
     // memcpy, matching the word order the background image is generated in.
     barBand.setSwapBytes(false);
+    // Seed the canvas with the image. The fill is only here so the sprite is
+    // in a known state if the image is ever missing; bgToBand overwrites every
+    // pixel of it immediately below.
     barBand.fillSprite(C_BG);
-    bgToBand(0, 0, SCREEN_W, BAR_BAND_H);   // seed the canvas with the image
+    bgToBand(0, 0, SCREEN_W, BAR_BAND_H);
   }
   Serial.printf("bar band sprite %s (%d x %d, %d bytes)\n",
                 barBandOk ? "ready" : "FAILED, drawing direct",
