@@ -133,6 +133,30 @@ The IRIS pot shares its function with fader_right on the controller
 
 Each pot's outer legs go to 3.3V and GND (all four share the rails). The gain, data rate, and mode match the controller's own ADS1115s, so the raw counts scale identically (0 to ~17000 full-travel) and the controller can run its standard `processPot()` on them.
 
+## Background image
+
+The whole screen sits on a 480x320 background image held in flash as RGB565, `src/bg_image.h`. Every draw path blits from it rather than filling a flat colour: the header band, the label strip, the message band, and the cleared portion of each value bar. Text is drawn transparent so the image shows behind it.
+
+Generate the header from a PNG:
+
+```bash
+~/.platformio/penv/bin/python tools/png_to_h.py background.png
+```
+
+Anything not already 480x320 is resized. The array costs about 300KB of flash (roughly 10% of the partition) and **no RAM**, since a `const` array on ESP32 stays memory-mapped in flash.
+
+`main.cpp` guards the include with `__has_include("bg_image.h")`. Without the generated header the project still builds and every background blit falls back to a flat `C_BG` fill, so the display behaves exactly as it did before the image existed.
+
+### Byte order
+
+The converter emits plain RGB565 words, the same form a `TFT_eSprite` holds internally, and every blit pushes with `swapBytes(false)`, which is what `pushSprite()` does internally. That one format is therefore correct both for pushes straight to the panel and for `memcpy` copies into the bar band sprite.
+
+If the colours come out wrong, regenerate with `--swap` rather than changing `setSwapBytes()` in `main.cpp`. That flag is set globally for other reasons and the blit helpers save and restore it around their own pushes.
+
+### Interaction with the bar band
+
+`drawBar()` needs the background as the base its green fill sits on, so the band sprite is seeded with the matching 480x20 slice of the image at startup and the cleared part of each bar is re-blitted from the image rather than filled black. The delta-push optimisation is unaffected: only the columns between the old and new fill edge still reach the panel.
+
 ## UART protocol
 
 One ASCII line every 40 ms (25 Hz):
