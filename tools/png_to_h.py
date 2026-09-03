@@ -20,8 +20,16 @@ Getting this backwards does not produce a subtle tint. Smooth gradients break
 into vivid blue, green and magenta banding while the geometry stays perfect,
 because the high and low bytes of every pixel trade places.
 
+Dithers by default. RGB565 has only 32/64/32 levels per channel, so a smooth
+gradient collapses into wide flat bands with hard steps between them. Floyd
+Steinberg error diffusion spends the quantisation error on neighbouring pixels
+instead of discarding it, which turns those steps into fine noise the eye reads
+as a continuous ramp. It costs nothing at runtime: same array size, same push
+time, same firmware.
+
 Usage:
     ~/.platformio/penv/bin/python tools/png_to_h.py background.png
+    ~/.platformio/penv/bin/python tools/png_to_h.py background.png --no-dither
     ~/.platformio/penv/bin/python tools/png_to_h.py background.png --no-swap
 
 The array lands in flash (about 300KB), not RAM.
@@ -46,9 +54,64 @@ def to_rgb565(r, g, b):
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
 
+def quantise(value, levels):
+    """Nearest representable level, and what intensity that actually shows."""
+    q = int(value * levels / 255.0 + 0.5)
+    if q < 0:
+        q = 0
+    elif q > levels:
+        q = levels
+    return q, q * 255.0 / levels
+
+
+def dither565(im):
+    """Floyd Steinberg error diffusion straight into 5-6-5.
+
+    Quantising each channel independently and pushing the residual into the
+    neighbours that have not been written yet. Without this a gentle ramp only
+    changes value every dozen or so pixels and the steps read as contours.
+    """
+    w, h = im.size
+    src = im.load()
+
+    # One float row per channel, plus the row below to accumulate error into.
+    cur = [[float(src[x, y][c]) for x in range(w)] for y in (0,) for c in range(3)]
+    nxt = [[0.0] * w for _ in range(3)]
+
+    LEVELS = (31, 63, 31)   # 5-6-5
+    out = []
+
+    for y in range(h):
+        for x in range(w):
+            row = []
+            for c in range(3):
+                v = cur[c][x]
+                q, shown = quantise(v, LEVELS[c])
+                err = v - shown
+                row.append(q)
+
+                # 7/16 right, 3/16 below-left, 5/16 below, 1/16 below-right
+                if x + 1 < w:
+                    cur[c][x + 1] += err * 7.0 / 16.0
+                    nxt[c][x + 1] += err * 1.0 / 16.0
+                if x > 0:
+                    nxt[c][x - 1] += err * 3.0 / 16.0
+                nxt[c][x] += err * 5.0 / 16.0
+            out.append((row[0] << 11) | (row[1] << 5) | row[2])
+
+        if y + 1 < h:
+            for c in range(3):
+                base = [float(src[x, y + 1][c]) for x in range(w)]
+                cur[c] = [base[x] + nxt[c][x] for x in range(w)]
+                nxt[c] = [0.0] * w
+
+    return out
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    swap = "--no-swap" not in sys.argv   # swapped is the correct default here
+    swap   = "--no-swap" not in sys.argv     # swapped is the correct default here
+    dither = "--no-dither" not in sys.argv   # so is dithering
     if len(args) != 1:
         sys.exit(__doc__)
 
@@ -59,14 +122,14 @@ def main():
         print("resizing %dx%d -> %dx%d" % (im.size[0], im.size[1], WIDTH, HEIGHT))
         im = im.resize((WIDTH, HEIGHT), Image.LANCZOS)
 
-    px = im.load()
-    words = []
-    for y in range(HEIGHT):
-        for x in range(WIDTH):
-            c = to_rgb565(*px[x, y])
-            if swap:
-                c = ((c & 0xFF) << 8) | (c >> 8)
-            words.append(c)
+    if dither:
+        print("dithering (Floyd Steinberg) into 5-6-5")
+        raw = dither565(im)
+    else:
+        px = im.load()
+        raw = [to_rgb565(*px[x, y]) for y in range(HEIGHT) for x in range(WIDTH)]
+
+    words = [(((c & 0xFF) << 8) | (c >> 8)) if swap else c for c in raw]
 
     out = os.path.normpath(OUT)
     with open(out, "w") as f:
@@ -75,6 +138,7 @@ def main():
         f.write("//\n")
         f.write("// Plain RGB565 words, %d x %d, %d bytes in flash.\n"
                 % (WIDTH, HEIGHT, WIDTH * HEIGHT * 2))
+        f.write("// Dithering: %s\n" % ("Floyd Steinberg" if dither else "none"))
         f.write("// Byte order: %s. Sprites store colour byte-swapped\n"
                 % ("swapped, sprite-native" if swap else "plain RGB565"))
         f.write("// (TFT_eSprite::drawPixel), and the ILI9488 path writes through\n")

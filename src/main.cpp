@@ -64,6 +64,15 @@
 //                                    that by default. Simulating the firmware's own byte
 //                                    path over the generated header gives a max error of
 //                                    5 (quantisation) where the old header gave 168.
+//                    2026-09-03 -KL  Background is now Floyd Steinberg dithered when
+//                                    generated. RGB565 gives only 32/64/32 levels, so the
+//                                    7028 colours in the source PNG collapsed to 281 and
+//                                    a gentle ramp only changed value every 16 pixels,
+//                                    which is what showed as hard contour bands. Diffusing
+//                                    the quantisation error into neighbouring pixels turns
+//                                    those steps into fine noise instead. No firmware
+//                                    change and no runtime cost: same array, same flash,
+//                                    same push time.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four

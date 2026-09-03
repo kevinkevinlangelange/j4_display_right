@@ -147,6 +147,18 @@ Anything not already 480x320 is resized. The array costs about 300KB of flash (r
 
 `main.cpp` guards the include with `__has_include("bg_image.h")`. Without the generated header the project still builds and every background blit falls back to a flat `C_BG` fill, so the display behaves exactly as it did before the image existed.
 
+### Dithering
+
+`png_to_h.py` applies Floyd Steinberg error diffusion by default. RGB565 carries only 32/64/32 levels per channel, so a smooth gradient collapses into wide flat bands: for `bgscrn_w3.png` the source's 7028 colours became 281, and along a horizontal line through a shaded area the value only changed every 16 pixels. Those steps are what read as contour banding on the panel.
+
+Dithering spends the quantisation error on neighbouring pixels rather than discarding it, so the same 5-6-5 palette resolves into fine noise the eye integrates into a continuous ramp. Measured on that image, transitions along the sampled row went from 30 to 435 and mean absolute error against the source dropped from 2.31 to 1.95.
+
+It is free: same array size, same flash cost, same push time, no firmware change. Pass `--no-dither` to turn it off.
+
+### Colour depth ceiling
+
+The ILI9488 accepts 18-bit pixels over SPI, 64 levels per channel, but TFT_eSPI's pixel path is 16-bit RGB565 and expands each value on the way out. Red and blue therefore only ever reach 32 of the panel's 64 levels; green already uses all 64. Recovering the missing bit means bypassing `pushPixels()` and writing raw 3-byte pixels after `setAddrWindow()`, at 50% more flash and 50% longer pushes. Dithered 5-6-5 is smoother than undithered 6-6-6, so this is only worth doing if banding survives dithering.
+
 ### Byte order
 
 The converter emits **byte-swapped** RGB565 words, and every blit pushes with `swapBytes(false)`. Two independent reasons make that the right combination, and they compound rather than cancel:
