@@ -149,9 +149,14 @@ Anything not already 480x320 is resized. The array costs about 300KB of flash (r
 
 ### Byte order
 
-The converter emits plain RGB565 words, the same form a `TFT_eSprite` holds internally, and every blit pushes with `swapBytes(false)`, which is what `pushSprite()` does internally. That one format is therefore correct both for pushes straight to the panel and for `memcpy` copies into the bar band sprite.
+The converter emits **byte-swapped** RGB565 words, and every blit pushes with `swapBytes(false)`. Two independent reasons make that the right combination, and they compound rather than cancel:
 
-If the colours come out wrong, regenerate with `--swap` rather than changing `setSwapBytes()` in `main.cpp`. That flag is set globally for other reasons and the blit helpers save and restore it around their own pushes.
+1. A `TFT_eSprite` stores colour byte-swapped internally. `TFT_eSprite::drawPixel()` writes `(color >> 8) | (color << 8)`, and `pushSprite()` then sets `swapBytes(false)` *because* the buffer is already swapped, not because the data should be plain.
+2. The ILI9488 is a 3-byte RGB panel, so `pushPixels()` with `swapBytes(false)` writes through `tft_Write_16S()`, which swaps its input again on the way out.
+
+Getting this backwards does not produce a subtle tint. Smooth gradients shatter into vivid blue, green and magenta banding while the geometry stays perfect, because the high and low byte of every pixel trade places. If that ever reappears, regenerate the header rather than changing `setSwapBytes()` in `main.cpp`, which is set globally for other reasons and is saved and restored around each blit anyway.
+
+The conversion can be checked without hardware by decoding the generated array through the same byte path the firmware uses and diffing against the source PNG. Correct output gives a max per-channel error of 5, which is RGB565 quantisation. The unswapped version gives 168.
 
 ### Interaction with the bar band
 

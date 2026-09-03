@@ -5,15 +5,24 @@ png_to_h.py -- turn a 480x320 image into src/bg_image.h for j4_display_right.
   created:  2026-09-02 -KL
    author:  Kevin Lange
 
-Emits plain RGB565 uint16_t words, which is the form a TFT_eSPI sprite holds
-internally. Everything in main.cpp blits the background with swapBytes(false),
-exactly as pushSprite() does, so this one format is correct both for pushes
-straight to the panel and for copies into the bar band sprite. Do not "fix"
-colours by changing setSwapBytes() in main.cpp; regenerate with --swap here.
+Emits BYTE-SWAPPED RGB565 words by default, because that is what a TFT_eSPI
+sprite holds internally: TFT_eSprite::drawPixel() stores
+((color >> 8) | (color << 8)), and pushSprite() then sets swapBytes(false)
+precisely because the buffer is already swapped. On top of that the ILI9488 is
+a 3-byte RGB panel, so pushPixels() with swapBytes(false) writes through
+tft_Write_16S(), which swaps its input again on the way out.
+
+Both paths therefore want swapped words, and main.cpp blits everything with
+swapBytes(false), so this default is correct for pushes straight to the panel
+and for memcpy copies into the bar band sprite alike.
+
+Getting this backwards does not produce a subtle tint. Smooth gradients break
+into vivid blue, green and magenta banding while the geometry stays perfect,
+because the high and low bytes of every pixel trade places.
 
 Usage:
     ~/.platformio/penv/bin/python tools/png_to_h.py background.png
-    ~/.platformio/penv/bin/python tools/png_to_h.py background.png --swap
+    ~/.platformio/penv/bin/python tools/png_to_h.py background.png --no-swap
 
 The array lands in flash (about 300KB), not RAM.
 """
@@ -39,7 +48,7 @@ def to_rgb565(r, g, b):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    swap = "--swap" in sys.argv
+    swap = "--no-swap" not in sys.argv   # swapped is the correct default here
     if len(args) != 1:
         sys.exit(__doc__)
 
@@ -66,7 +75,10 @@ def main():
         f.write("//\n")
         f.write("// Plain RGB565 words, %d x %d, %d bytes in flash.\n"
                 % (WIDTH, HEIGHT, WIDTH * HEIGHT * 2))
-        f.write("// Blitted with swapBytes(false), matching how pushSprite() pushes.\n\n")
+        f.write("// Byte order: %s. Sprites store colour byte-swapped\n"
+                % ("swapped, sprite-native" if swap else "plain RGB565"))
+        f.write("// (TFT_eSprite::drawPixel), and the ILI9488 path writes through\n")
+        f.write("// tft_Write_16S() when swapBytes is false, so swapped is correct here.\n\n")
         f.write("#pragma once\n\n")
         f.write("#include <stdint.h>\n\n")
         f.write("#define BG_IMAGE_W  %d\n" % WIDTH)

@@ -55,6 +55,15 @@
 //                                    decoding the generated array back to a bitmap and
 //                                    diffing against the source PNG: max per-channel error
 //                                    5, which is RGB565 quantisation and nothing else.
+//                    2026-09-02 -KL  Fixed the background byte order. First flash came up
+//                                    as vivid blue/green/magenta banding with the geometry
+//                                    perfect, which is the signature of swapped high and
+//                                    low bytes. Sprites store colour byte-swapped and the
+//                                    ILI9488 path writes through tft_Write_16S(), so the
+//                                    array has to be swapped too; the converter now does
+//                                    that by default. Simulating the firmware's own byte
+//                                    path over the generated header gives a max error of
+//                                    5 (quantisation) where the old header gave 168.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -303,10 +312,21 @@ String        linkBuf    = "";
 // Blit a rectangle of the background image straight to the panel.
 //
 // Image rows are contiguous, so a full-width rectangle is one push and
-// anything narrower goes row by row. The image is plain RGB565 words, the same
-// form a sprite holds, so this pushes with swapBytes(false) exactly as
-// pushSprite() does internally, then restores the flag. With no image
-// generated yet this is a flat fill and the display behaves as before.
+// anything narrower goes row by row.
+//
+// The image is stored BYTE-SWAPPED, which is what a TFT_eSPI sprite holds
+// internally (TFT_eSprite::drawPixel stores (color >> 8) | (color << 8)), and
+// pushSprite() sets swapBytes(false) precisely because the buffer is already
+// swapped. The ILI9488 is a 3-byte RGB panel, so pushPixels() with
+// swapBytes(false) writes through tft_Write_16S(), which swaps again on the
+// way out. Push with swapBytes(false) here to match, then restore the flag.
+//
+// Getting this backwards does not tint the image, it shatters every gradient
+// into blue and magenta banding while the geometry stays perfect. If that ever
+// reappears, regenerate the header, do not change the flag.
+//
+// With no image generated yet this is a flat fill and the display behaves as
+// it did before the background existed.
 void bgToPanel(int16_t x, int16_t y, int16_t w, int16_t h) {
 #if HAVE_BG
   bool oldSwap = tft.getSwapBytes();
@@ -529,7 +549,8 @@ void setup() {
   barBandOk = (barBand.createSprite(SCREEN_W, BAR_BAND_H) != NULL);
   if (barBandOk) {
     // swapBytes false so pushImage into the sprite is a straight per-row
-    // memcpy, matching the word order the background image is generated in.
+    // memcpy. The image is generated in sprite-native (byte-swapped) order, so
+    // it drops straight in with no conversion.
     barBand.setSwapBytes(false);
     // Seed the canvas with the image. The fill is only here so the sprite is
     // in a known state if the image is ever missing; bgToBand overwrites every
