@@ -26,14 +26,15 @@ Where the pot values go from there:
 | Microcontroller | SeeedStudio XIAO ESP32S3 |
 | Display | 3.5" TFT LCD, 480x320, SPI, ILI9488 driver (landscape) |
 | ADC | ADS1115, 16-bit, 4 channels, I2C addr 0x48 (ADDR pin to GND) |
+| Storage | microSD in the TFT module's slot, sharing the display's SPI bus. Holds `FACES.TXT`, the authoritative saved-face store for the robot |
 
 ## Pin assignments
 
 | XIAO Pin | GPIO | Function |
 |----------|------|----------|
-| 3V3 | n/a | Display VCC + ADS1115 VDD (3.3V power) |
+| 3V3 | n/a | Display VCC + ADS1115 VDD + microSD VCC (3.3V power) |
 | GND | n/a | Display/ADS1115 GND, shared with TTGO GND |
-| D0 | GPIO1 | TFT backlight (HIGH = on) |
+| D0 | GPIO1 | microSD chip select (card on the TFT module's own slot) |
 | D1 | GPIO2 | TFT RST |
 | D2 | GPIO3 | TFT DC |
 | D3 | GPIO4 | TFT CS |
@@ -53,7 +54,7 @@ read top-to-bottom as shown.
 ```
             LEFT rail                              RIGHT rail
                             +--[ USB-C ]--+
-     TFT BL  -- D0 (GP1) |  |             |  | 5V           (unused)
+     SD CS   -- D0 (GP1) |  |             |  | 5V           (unused)
      TFT RST -- D1 (GP2) |  |    XIAO     |  | GND          ground
      TFT DC  -- D2 (GP3) |  |   ESP32-S3  |  | 3V3          TFT VCC + ADS1115 VDD
      TFT CS  -- D3 (GP4) |  |             |  | D10 (GP9)    TFT MOSI
@@ -63,7 +64,10 @@ LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
               (GP43)        +-------------+
 
    D4/D5 are the XIAO's native I2C pins -- the ADS1115 hangs there (addr 0x48).
-   The TTGO->XIAO direction (D7) carries the face-preset messages (M:/X:).
+   The TTGO->XIAO direction (D7) carries face-preset messages and face storage.
+   The microSD shares the TFT's SPI bus (D8/D9/D10) and takes only its own
+   chip select on D0. That pin is available because the display module's LED
+   pin is wired to 3.3V rather than driven, so TFT_BL is not defined at all.
 ```
 
 ## ADS1115 pin diagrams
@@ -109,13 +113,26 @@ The IRIS pot shares its function with fader_right on the controller
 |------|-------------|
 | 3V3 | VCC |
 | GND | GND |
-| D0 (GPIO1) | LED / BL (backlight) |
+| (not wired) | LED / BL -- strapped to 3.3V, backlight always on |
 | D1 (GPIO2) | RST |
 | D2 (GPIO3) | DC |
 | D3 (GPIO4) | CS |
 | D8 (GPIO7) | SCK |
 | D9 (GPIO8) | MISO (SDO) |
 | D10 (GPIO9) | MOSI (SDI) |
+
+The microSD on the same module shares that SPI bus and adds one wire:
+
+| XIAO | microSD pin |
+|------|-------------|
+| D0 (GPIO1) | SD_CS |
+| D8 (GPIO7) | SD_SCK (same net as TFT SCK) |
+| D9 (GPIO8) | SD_MISO (same net as TFT MISO) |
+| D10 (GPIO9) | SD_MOSI (same net as TFT MOSI) |
+| 3V3 | VCC |
+| GND | GND |
+
+If the fitted module does not break out its SD pins, any SPI microSD breakout wires to the same six points with no firmware change.
 
 ## Wiring to ADS1115
 
@@ -132,6 +149,48 @@ The IRIS pot shares its function with fader_right on the controller
 | A3 | VOLUME pot wiper |
 
 Each pot's outer legs go to 3.3V and GND (all four share the rails). The gain, data rate, and mode match the controller's own ADS1115s, so the raw counts scale identically (0 to ~17000 full-travel) and the controller can run its standard `processPot()` on them.
+
+## Saved-face store
+
+This board carries the authoritative saved-face store for the robot, in `FACES.TXT` on the microSD in the TFT module's slot. j4_controller owns the faces at runtime and keeps a copy in its own NVS flash, but the card here is the source of truth: the controller asks for a dump at boot and writes through on every save.
+
+### Protocol
+
+Added to the existing Serial link, alongside `M:`/`X:`/`I:`. Controller to this board:
+
+```
+FACES?                                   send me the whole store
+FACESAVE:<key>,<v0>..<v10>,<toggles>     persist this face
+```
+
+This board back to the controller:
+
+```
+FACE:<key>,<v0>..<v10>,<toggles>         one face from the dump
+FACE_END:<n>                             dump complete, n faces
+FACE_END:-1                              no card present
+FACEOK:<key>                             written to the card
+FACEERR:<key>                            write failed
+```
+
+`FACE_END:-1` is deliberately distinct from `FACE_END:0`. Zero means a mounted card with no faces on it yet, which is a complete and valid answer; minus one means there is no card to read, so the controller stays unsynced and keeps asking. That way a card inserted later is picked up without a reboot.
+
+On-card format is one CSV line per face, keyed by keypad character, which is exactly what j4_talk's Teensy used. A card can be moved between the two stores unconverted.
+
+A save rewrites the whole file rather than appending, so re-saving an existing key replaces that record instead of leaving two for the same key.
+
+### Sharing the SPI bus
+
+The card sits on the display's SPI bus, each device with its own chip select. Two details make that safe:
+
+- `SUPPORT_TRANSACTIONS` is mandatory and auto-defined for ESP32 (`Processors/TFT_eSPI_ESP32.h:37`), so TFT_eSPI toggles the HAL mutex around its own transfers.
+- The SD library is handed **TFT_eSPI's own `SPIClass`** via `tft.getSPIinstance()`, not the global `SPI` object. TFT_eSPI constructs its own instance (`Processors/TFT_eSPI_ESP32_S3.c:15`), and two instances driving one host fight over its configuration.
+
+The card is clocked at 4 MHz while the panel runs the same bus at 20 MHz. Each transaction sets its own clock, so this is only a conservative choice for a store that writes about 50 bytes at a time.
+
+### Absent or failed card
+
+Mounting is guarded the same way as the ADS1115: probe before use, and only retry an absent card once per second, so a missing or dead card never stalls the 25 Hz pot feed. A failed write drops the mount so the next probe starts clean, and answers `FACEERR:`, which the controller treats as "held in NVS, stop auto-retrying" rather than data loss.
 
 ## Background image
 
