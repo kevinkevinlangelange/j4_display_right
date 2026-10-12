@@ -115,6 +115,14 @@
 //                                    up. The header is only repainted when its text
 //                                    actually changes, so the controller re-sending an
 //                                    open "OVERRIDE FACE A?" prompt does not flicker it.
+//                    2026-10-12 -KL  Fixed messages vanishing the instant they arrived.
+//                                    loop() read "now" before draining the link, and the
+//                                    M: handler stamped the message with a fresh millis()
+//                                    that could be 1ms later, so "now - msgShownAt" went
+//                                    negative, wrapped to ~4 billion as unsigned, and the
+//                                    15s stale-message clear fired on the same pass. That
+//                                    is what made the OVERRIDE prompt flash and vanish.
+//                                    "now" is re-read after the link is drained.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -1044,6 +1052,12 @@ void loop() {
       linkBuf += c;
     }
   }
+
+  // Re-read the clock. The lines above stamp msgShownAt and linkAt[] with
+  // their own millis(), which can be later than the "now" read at the top;
+  // unsigned "now - stamp" would then wrap to ~4 billion and clear a message
+  // the instant it arrived.
+  now = millis();
 
   // Self-clear a stale message in case the controller's "X:" got lost.
   if (msgShown && now - msgShownAt >= MSG_SAFETY_CLEAR_MS) {

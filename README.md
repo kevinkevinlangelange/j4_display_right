@@ -289,7 +289,7 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 
 The header strip shows **KEVCO** until a face is recalled or saved, then **Face: A** (with a `*` once anything has changed since that face was saved). It drops back to KEVCO if the controller goes quiet for a second.
 
-Messages from the controller take the header strip's place while they are up: a large first line ("FACE SAVED TO A", "OVERRIDE FACE A?", "NO FACE ON A") and a smaller second line ("SD CARD OK", "PRESS * TO CONFIRM, OTHER KEY CANCELS"). Nothing else on the screen is covered. The header returns to its normal text when the controller clears the message, or after 15s if that clear is lost; the controller re-sends an open override prompt every 5s to keep it up, and the header is only repainted when its text actually changes, so the re-send does not flicker.
+Messages from the controller take the header strip's place while they are up: a large first line ("FACE A SAVED TO SD CARD", "OVERRIDE FACE A?", "NO FACE ON A") and a smaller second line ("SD CARD OK", "PRESS * TO CONFIRM, OTHER KEY CANCELS"). Nothing else on the screen is covered. The header returns to its normal text when the controller clears the message, or after 15s if that clear is lost; the controller re-sends an open override prompt every 5s to keep it up, and the header is only repainted when its text actually changes, so the re-send does not flicker.
 
 The face cells run in the order of `FACE_CELLS[]` in `main.cpp`; reorder that table if the physical pots sit differently.
 
