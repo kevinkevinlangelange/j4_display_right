@@ -105,6 +105,16 @@
 //                                    loop, and an absent card is re-probed every 5s
 //                                    instead of every 1s, since each failed mount stalls
 //                                    the loop for a few hundred ms. "I:" still accepted.
+//                    2026-10-12 -KL  Active face. V: lines may end in ",<key>,<mask>"
+//                                    (j4_controller v0_6_42): the header shows
+//                                    "Face: A" in place of KEVCO while a face is active,
+//                                    "Face: A*" once anything differs from what is saved
+//                                    on that key, and each changed value gets a "*" (the
+//                                    face numbers, and the IRIS/COLOR/BRIGHTNESS labels).
+//                                    A message still takes the header over while it is
+//                                    up. The header is only repainted when its text
+//                                    actually changes, so the controller re-sending an
+//                                    open "OVERRIDE FACE A?" prompt does not flicker it.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -129,7 +139,10 @@
 //                    connection-status screen.
 //
 //                    Lines FROM the controller:
-//                       "V:<11 values>"   effective face, 0-255 or -1, 25 Hz
+//                       "V:<11 values>[,<key>,<mask>]"
+//                                         effective face, 0-255 or -1, 25 Hz,
+//                                         plus the active face key ('-' = none)
+//                                         and which values differ from its save
 //                       "M:<l1>|<l2>"     show a message in the header strip
 //                       "X:"              clear it
 //                       "FACES?"          dump FACES.TXT as FACE: lines
@@ -303,6 +316,10 @@ enum {
 int16_t       faceVal[FACE_VALUES];        // last V: values, -1 = absent
 unsigned long faceValAt = 0;               // when the last V: landed
 bool          faceValSeen = false;
+// Active face from the end of the V: line: key 0 = none, mask bit i = FI
+// channel i differs from the saved face, bit FACE_VALUES = the toggles.
+char          faceKey  = 0;
+uint16_t      faceMask = 0;
 
 // Bottom bars IRIS/COLOR/BRIGHTNESS (index = CH_*). linkHold[c] means the bar
 // shows linkVal[c] rather than the local pot; it is set by the controller's
@@ -449,6 +466,9 @@ bool        numSprOk = false;
 int16_t potRaw[4]          = { 0, 0, 0, 0 };
 int16_t barPx[NUM_BARS];                   // last drawn fill width, -1 = force
 int16_t numShown[8];                       // last drawn face number, -2 = force
+bool    numStar[8];                        // last drawn "changed" mark
+uint8_t lblStars = 0xFF;                   // last drawn bottom label marks, 0xFF = force
+char    hdrShown[2 * MSG_MAX_LEN + 4] = "";  // last painted header text
 
 unsigned long potTx_previousMillis = 0;
 
@@ -637,12 +657,32 @@ static void bgToSprite(TFT_eSprite &spr, int16_t sx, int16_t sy,
 // Header strip: "KEVCO", or the current message in its place. A message is a
 // big first line and an optional smaller second line, so "FACE SAVED TO A" is
 // easy to read from arm's length without covering any value on the screen.
-void drawHeader() {
+//
+// With no message up, a recalled or saved face takes KEVCO's place as
+// "Face: A", with a "*" once anything has changed since that face was saved.
+// Repainted only when the text changes (force for the first paint).
+static bool faceLive() {
+  return faceValSeen && millis() - faceValAt < FACE_VAL_STALE_MS;
+}
+
+void drawHeader(bool force = false) {
+  char want[sizeof(hdrShown)];
+  char faceTxt[12] = "";
+  if (msgShown)
+    snprintf(want, sizeof(want), "M%s|%s", msgLine1, msgLine2);
+  else if (faceKey && faceLive()) {
+    snprintf(faceTxt, sizeof(faceTxt), "Face: %c%s", faceKey, faceMask ? "*" : "");
+    snprintf(want, sizeof(want), "F%s", faceTxt);
+  } else
+    strcpy(want, "K");
+  if (!force && strcmp(want, hdrShown) == 0) return;
+  strcpy(hdrShown, want);
+
   bgToPanel(0, HDR_Y, SCREEN_W, HDR_H);
   tft.setTextColor(C_GREEN);   // single argument = transparent, keeps the image
   tft.setTextDatum(MC_DATUM);
   if (!msgShown) {
-    tft.drawString("KEVCO", SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+    tft.drawString(faceTxt[0] ? faceTxt : "KEVCO", SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
   } else if (msgLine2[0] == '\0') {
     tft.drawString(msgLine1, SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
   } else {
@@ -654,13 +694,25 @@ void drawHeader() {
 }
 
 
-void drawLabels() {
+// Bottom labels. IRIS, COLOR and BRIGHTNESS are part of a face, so each gets
+// a "*" when it differs from the active face's saved value (bits 0-2 of the
+// V: mask, which are FI_IRIS..FI_BRIGHT, the same order as CH_*).
+static uint8_t labelStars() {
+  return (faceKey && faceLive()) ? (faceMask & 0x07) : 0;
+}
+
+void drawLabels(bool force = false) {
+  uint8_t stars = labelStars();
+  if (!force && stars == lblStars) return;
+  lblStars = stars;
   bgToPanel(0, LBL_Y, SCREEN_W, LBL_H);
   tft.setTextDatum(MC_DATUM);
   for (uint8_t i = 0; i < 4; i++) {
     int16_t cx = i * CELL_W + CELL_W / 2;
+    char lbl[16];
+    snprintf(lbl, sizeof(lbl), "%s%s", POT_LABELS[i], (stars >> i) & 1 ? "*" : "");
     tft.setTextColor(C_GREEN);   // transparent, so the image shows behind
-    tft.drawString(POT_LABELS[i], cx, LBL_Y + LBL_H / 2, 2);
+    tft.drawString(lbl, cx, LBL_Y + LBL_H / 2, 2);
     if (i > 0) tft.drawFastVLine(i * CELL_W, LBL_Y + 6, LBL_H - 12, C_DIM);
   }
   tft.setTextDatum(TL_DATUM);
@@ -762,13 +814,15 @@ void drawBar(uint8_t i, bool force = false) {
 // One face cell's number, composed in numSpr over the background and pushed
 // in one go so it never flickers through an empty frame.
 void drawFaceNumber(uint8_t k, bool force = false) {
-  int16_t v = faceValNow(FACE_CELLS[k].fi);
-  if (!force && v == numShown[k]) return;
+  int16_t v    = faceValNow(FACE_CELLS[k].fi);
+  bool    star = v >= 0 && faceKey && ((faceMask >> FACE_CELLS[k].fi) & 1);
+  if (!force && v == numShown[k] && star == numStar[k]) return;
   numShown[k] = v;
+  numStar[k]  = star;
 
-  char txt[6];
+  char txt[8];
   if (v < 0) strcpy(txt, "--");
-  else       snprintf(txt, sizeof(txt), "%d", v);
+  else       snprintf(txt, sizeof(txt), "%d%s", v, star ? "*" : "");
 
   int16_t cx = (k % 4) * CELL_W + CELL_W / 2;
   int16_t nx = cx - NUM_W / 2;
@@ -792,15 +846,33 @@ void drawFaceNumber(uint8_t k, bool force = false) {
 }
 
 
-// Parse "V:<11 comma-separated values>", each -1..255. Anything else is line
-// noise and changes nothing.
-bool parseValues(const String &body, int16_t *out) {
+// Parse "V:<11 comma-separated values>", each -1..255, optionally followed by
+// ",<active key>,<changed mask>" (v0_6_42 and later; '-' = no active face).
+// Anything else is line noise and changes nothing.
+bool parseValues(const String &body, int16_t *out, char *key, uint16_t *mask) {
   int v[FACE_VALUES];
-  char tail;
-  int n = sscanf(body.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%c",
-                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
-                 &v[6], &v[7], &v[8], &v[9], &v[10], &tail);
-  if (n != FACE_VALUES) return false;          // short, or trailing junk
+  char tail, k = '-';
+  unsigned m = 0;
+  uint8_t commas = 0;
+  for (uint16_t i = 0; i < body.length(); i++) if (body[i] == ',') commas++;
+  if (commas == FACE_VALUES - 1) {             // 11 values, older controller
+    int n = sscanf(body.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%c",
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                   &v[6], &v[7], &v[8], &v[9], &v[10], &tail);
+    if (n != FACE_VALUES) return false;        // short, or trailing junk
+  } else if (commas == FACE_VALUES + 1) {      // + active key and mask
+    int n = sscanf(body.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%c,%u%c",
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                   &v[6], &v[7], &v[8], &v[9], &v[10], &k, &m, &tail);
+    if (n != FACE_VALUES + 2) return false;
+    if (m >= (1u << (FACE_VALUES + 1))) return false;
+    if (!(k == '-' || k == '*' || k == '#' || isDigit(k) || (k >= 'A' && k <= 'D')))
+      return false;
+  } else {
+    return false;
+  }
+  *key  = (k == '-') ? 0 : k;
+  *mask = (uint16_t)m;
   for (uint8_t i = 0; i < FACE_VALUES; i++) {
     if (v[i] < -1 || v[i] > LINK_VAL_MAX) return false;
     out[i] = (int16_t)v[i];
@@ -827,8 +899,12 @@ void handleLinkLine(const String &line) {
   unsigned long now = millis();
   if (line.startsWith("V:")) {
     int16_t v[FACE_VALUES];
-    if (parseValues(line.substring(2), v)) {
+    char     k;
+    uint16_t m;
+    if (parseValues(line.substring(2), v, &k, &m)) {
       memcpy(faceVal, v, sizeof(faceVal));
+      faceKey  = k;
+      faceMask = m;
       faceValAt   = now;
       faceValSeen = true;
       linkSet(CH_IRIS,       v[FI_IRIS],   now);
@@ -844,7 +920,7 @@ void handleLinkLine(const String &line) {
     strncpy(msgLine2, l2.c_str(), MSG_MAX_LEN); msgLine2[MSG_MAX_LEN] = '\0';
     msgShown   = true;
     msgShownAt = now;
-    drawHeader();
+    drawHeader();            // no-op if this is the same message re-sent
   } else if (line.startsWith("X:")) {
     if (msgShown) {
       msgShown = false;
@@ -878,11 +954,11 @@ void handleLinkLine(const String &line) {
 
 void drawScreen() {
   bgToPanel(0, 0, SCREEN_W, SCREEN_H);
-  drawHeader();
+  drawHeader(true);
   tft.drawFastHLine(0, HDR_H, SCREEN_W, C_GREEN);
   drawFaceLabels();
   tft.drawFastHLine(0, BAR_Y - 2, SCREEN_W, C_DIM);
-  drawLabels();
+  drawLabels(true);
   for (uint8_t i = 0; i < NUM_BARS; i++) drawBar(i, true);
   for (uint8_t k = 0; k < 8; k++) drawFaceNumber(k, true);
 }
@@ -898,7 +974,7 @@ void setup() {
 
   for (uint8_t i = 0; i < FACE_VALUES; i++) faceVal[i] = -1;
   for (uint8_t i = 0; i < NUM_BARS; i++)    barPx[i]   = -1;
-  for (uint8_t k = 0; k < 8; k++)           numShown[k] = -2;
+  for (uint8_t k = 0; k < 8; k++)         { numShown[k] = -2; numStar[k] = false; }
 
   // ADS1115 on the XIAO's native I2C pins (D4/D5 = GPIO5/6). Probed via
   // adsReady() before every read: the ADS1X15 library's readADC() has no
@@ -1012,5 +1088,7 @@ void loop() {
 
     for (uint8_t i = 0; i < NUM_BARS; i++) drawBar(i);
     for (uint8_t k = 0; k < 8; k++)        drawFaceNumber(k);
+    drawLabels();    // each of these repaints only on a change
+    drawHeader();
   }
 }

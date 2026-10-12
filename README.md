@@ -1,6 +1,6 @@
 # j4_display_right
 
-Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar. The upper area shows the eight face pots read on the controller (Basket Eyebrow L/R, Eyebrow L/R, Bottom Eyelid L/R, Nose, Nose Basket), each with its 0-255 value and a bar, and the header strip shows face-preset messages such as **FACE SAVED TO A**.
+Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar. The upper area shows the eight face pots read on the controller (Basket Eyebrow L/R, Eyebrow L/R, Bottom Eyelid L/R, Nose, Nose Basket), each with its 0-255 value and a bar, and the header strip shows the active face (**Face: A**, or **Face: A\*** once something has changed since it was saved) and face-preset messages such as **FACE SAVED TO A**.
 
 Since the controller's four ADS1115 ADCs have their channels allocated to the joysticks and face pots (with only spares left for the future 17th-19th pot readouts), this board carries the system's fifth ADS1115, which reads the four pots beneath it and immediately streams the values to the TTGO [j4_controller](https://github.com/kevinkevinlangelange/j4_controller) over UART.
 
@@ -251,13 +251,15 @@ Values are raw ADS1115 counts. The controller scales them (`processPot()`) and f
 Downstream (TTGO to this board):
 
 ```
-V:<11 values>\n        the effective face, 25 Hz (see below)
+V:<11 values>,<key>,<mask>\n  the effective face + active face, 25 Hz (see below)
 M:<line1>|<line2>\n    show a message in the header strip ("FACE SAVED TO A" | "SD CARD OK")
 X:\n                   clear it
 I:<0-255>\n            iris only; sent by controllers before v0_6_41, still accepted
 ```
 
 `V:` carries the controller's effective face in `FACES.TXT` order: iris, color, brightness, Eyebrow L, Eyebrow R, Basket Eyebrow L, Basket Eyebrow R, Nose, Nose Basket, Bottom Eyelid L, Bottom Eyelid R. Each is 0-255, or `-1` when the controller has no source for that channel (its ADS1115 is absent and no recalled face is holding it), which draws as `--`. The values are post-arbitration and post-recall, so the screen shows what the servos are actually being sent.
+
+The last two fields (j4_controller v0_6_42 and later) are the **active face**: `<key>` is the keypad key last recalled or saved (`-` for none), and `<mask>` says which values differ from what is saved on that key, bit *n* for value *n* in the order above and bit 11 for the LASER / VENT / EYE POP toggles. The header shows **Face: A** while the mask is 0 and **Face: A\*** otherwise, each changed face pot number gets a `*` (`123*`), and so do the IRIS / COLOR / BRIGHTNESS labels. A line with only the 11 values (older controllers) is still accepted and simply shows no active face.
 
 - **The eight face pots** (upper area) are read on the controller, so `V:` is their only route here. If it goes quiet for a second they blank to `--` rather than freezing on numbers that look live.
 - **IRIS, COLOR and BRIGHTNESS** (bottom bars) are this board's own pots, but the controller is where the IRIS pot is arbitrated against `fader_right` (`dualPick()`) and where a recalled face overrides all three. So while `V:` is live each of those bars draws the controller's value. Once it goes quiet a bar **holds** that value rather than reverting, and switches to the local pot only when the pot is physically moved past `LINK_TAKEOVER_RAW` (270 counts, the controller's `DUAL_CLAIM_COUNTS` of 4/255 expressed in raw counts). The baseline freezes when the feed stops, so a slow turn still claims the bar, matching `dualPick()`'s frozen-baseline takeover. A `-1` for one of them hands that bar straight back to the local pot.
@@ -271,7 +273,7 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 
 ```
 +---------------------------------------------------------+  y=0
-|          KEVCO   (or a message: FACE SAVED TO A)        |  header strip (48px)
+|    KEVCO / Face: A / Face: A* / a message (48px)        |  header strip
 +---------------------------------------------------------+  green line
 | BASKET BROW L | BASKET BROW R |  EYEBROW L | EYEBROW R   |
 |      123      |      123      |    123     |    123      |  face row 0 (92px)
@@ -285,7 +287,9 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 +---------------------------------------------------------+  y=320
 ```
 
-Messages from the controller take the header strip's place for a few seconds: a large first line ("FACE SAVED TO A", "FACE A RECALLED", "NO FACE ON A") and a smaller second line ("SD CARD OK"). Nothing else on the screen is covered, and KEVCO comes back when the controller clears the message (or after 15s if that clear is lost).
+The header strip shows **KEVCO** until a face is recalled or saved, then **Face: A** (with a `*` once anything has changed since that face was saved). It drops back to KEVCO if the controller goes quiet for a second.
+
+Messages from the controller take the header strip's place while they are up: a large first line ("FACE SAVED TO A", "OVERRIDE FACE A?", "NO FACE ON A") and a smaller second line ("SD CARD OK", "PRESS * TO CONFIRM, OTHER KEY CANCELS"). Nothing else on the screen is covered. The header returns to its normal text when the controller clears the message, or after 15s if that clear is lost; the controller re-sends an open override prompt every 5s to keep it up, and the header is only repainted when its text actually changes, so the re-send does not flicker.
 
 The face cells run in the order of `FACE_CELLS[]` in `main.cpp`; reorder that table if the physical pots sit differently.
 
