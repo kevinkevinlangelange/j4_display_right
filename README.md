@@ -1,6 +1,6 @@
 # j4_display_right
 
-Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar.
+Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar. The upper area shows the eight face pots read on the controller (Basket Eyebrow L/R, Eyebrow L/R, Bottom Eyelid L/R, Nose, Nose Basket), each with its 0-255 value and a bar, and the header strip shows face-preset messages such as **FACE SAVED TO A**.
 
 Since the controller's four ADS1115 ADCs have their channels allocated to the joysticks and face pots (with only spares left for the future 17th-19th pot readouts), this board carries the system's fifth ADS1115, which reads the four pots beneath it and immediately streams the values to the TTGO [j4_controller](https://github.com/kevinkevinlangelange/j4_controller) over UART.
 
@@ -8,7 +8,8 @@ Since the controller's four ADS1115 ADCs have their channels allocated to the jo
 
 - Reads 4 pots (IRIS, COLOR, BRIGHTNESS, VOLUME) via a dedicated ADS1115 on its own I2C bus
 - Streams the raw readings to the TTGO controller at 25 Hz as an ASCII line: `P:<iris>,<color>,<brightness>,<volume>\n` (the steady stream doubles as this board's heartbeat)
-- Renders the label strip and live value bars on a 3.5" ILI9488 TFT in landscape
+- Renders the face pot values, the label strip and live value bars on a 3.5" ILI9488 TFT in landscape
+- Holds the robot's saved faces in `FACES.TXT` on the TFT module's microSD
 
 Where the pot values go from there:
 
@@ -26,7 +27,7 @@ Where the pot values go from there:
 | Microcontroller | SeeedStudio XIAO ESP32S3 |
 | Display | 3.5" TFT LCD, 480x320, SPI, ILI9488 driver (landscape) |
 | ADC | ADS1115, 16-bit, 4 channels, I2C addr 0x48 (ADDR pin to GND) |
-| Storage | microSD in the TFT module's slot, sharing the display's SPI bus. Holds `FACES.TXT`, the authoritative saved-face store for the robot |
+| Storage | microSD in the TFT module's slot, sharing the display's SPI bus. Holds `FACES.TXT`, the authoritative saved-face store for the robot. Format it **FAT32** (exFAT will not mount) |
 
 ## Pin assignments
 
@@ -41,7 +42,7 @@ Where the pot values go from there:
 | D4 | GPIO5 | I2C SDA (ADS1115) |
 | D5 | GPIO6 | I2C SCL (ADS1115) |
 | D6 | GPIO43 | UART TX to TTGO GPIO26 |
-| D7 | GPIO44 | UART RX from TTGO GPIO25 (face-preset messages) |
+| D7 | GPIO44 | UART RX from TTGO GPIO25 (face values, messages, face store) |
 | D8 | GPIO7 | TFT SCLK |
 | D9 | GPIO8 | TFT MISO |
 | D10 | GPIO9 | TFT MOSI |
@@ -64,7 +65,7 @@ LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
               (GP43)        +-------------+
 
    D4/D5 are the XIAO's native I2C pins -- the ADS1115 hangs there (addr 0x48).
-   The TTGO->XIAO direction (D7) carries face-preset messages and face storage.
+   The TTGO->XIAO direction (D7) carries face values, messages and face storage.
    The microSD shares the TFT's SPI bus (D8/D9/D10) and takes only its own
    chip select on D0. That pin is available because the display module's LED
    pin is wired to 3.3V rather than driven, so TFT_BL is not defined at all.
@@ -104,7 +105,7 @@ The IRIS pot shares its function with fader_right on the controller
 | XIAO | TTGO |
 |------|------|
 | D6 (GPIO43) TX | GPIO26 RX |
-| D7 (GPIO44) RX | GPIO25 TX (face-preset messages) |
+| D7 (GPIO44) RX | GPIO25 TX (face values, messages, face store) |
 | GND | GND |
 
 ## Wiring to ILI9488 display module
@@ -134,6 +135,8 @@ The microSD on the same module shares that SPI bus and adds one wire:
 
 If the fitted module does not break out its SD pins, any SPI microSD breakout wires to the same six points with no firmware change.
 
+**If a FAT32 card never mounts** (USB serial keeps printing `microSD on CS=1: absent, will retry` with a card in the slot, and the controller's face saves end in "SD WRITE FAILED, KEPT IN CONTROLLER"), the likely cause is the panel's own MISO. On many ILI9488 modules the display's SDO pin does not release the line when its CS is high, so it fights the card on the shared MISO net. This firmware never reads from the panel, so the fix is to **disconnect the wire on the display's MISO/SDO pin** and keep only SD_MISO on D9. Nothing in the firmware changes. (The TFT bring-up diagnostic's ID readback is the only thing that uses the panel's MISO.)
+
 ## Wiring to ADS1115
 
 | ADS1115 | Connect to |
@@ -156,7 +159,7 @@ This board carries the authoritative saved-face store for the robot, in `FACES.T
 
 ### Protocol
 
-Added to the existing Serial link, alongside `M:`/`X:`/`I:`. Controller to this board:
+Added to the existing Serial link, alongside `V:`/`M:`/`X:`. Controller to this board:
 
 ```
 FACES?                                   send me the whole store
@@ -190,11 +193,13 @@ The card is clocked at 4 MHz while the panel runs the same bus at 20 MHz. Each t
 
 ### Absent or failed card
 
-Mounting is guarded the same way as the ADS1115: probe before use, and only retry an absent card once per second, so a missing or dead card never stalls the 25 Hz pot feed. A failed write drops the mount so the next probe starts clean, and answers `FACEERR:`, which the controller treats as "held in NVS, stop auto-retrying" rather than data loss.
+Mounting is guarded the same way as the ADS1115: probe before use, and only retry an absent card every 5 seconds (`SD_REPROBE_MS`). A failed mount runs the SD library's init retries at 400 kHz and holds the loop for a few hundred ms, so probing every second made the bars stutter with no card in; the controller also slows its dump requests to one per 10s while the answer is "no card". A card that mounts is never probed again. A failed write, or a dump that finds the card gone, unmounts it (`SD.end()`, so the next probe really re-initialises rather than returning the stale mount) and answers `FACEERR:` / `FACE_END:-1`, which the controller treats as "held in NVS, retry when the card is back" rather than data loss.
+
+The link's receive buffer is 4096 bytes (`LINK_RX_BUF`), so nothing from the controller is dropped while a repaint or a mount attempt holds the loop.
 
 ## Background image
 
-The whole screen sits on a 480x320 background image held in flash as RGB565, `src/bg_image.h`. Every draw path blits from it rather than filling a flat colour: the header band, the label strip, the message band, and the cleared portion of each value bar. Text is drawn transparent so the image shows behind it.
+The whole screen sits on a 480x320 background image held in flash as RGB565, `src/bg_image.h`. Every draw path blits from it rather than filling a flat colour: the header strip, the labels, the face value numbers, and the cleared portion of each value bar. Text is drawn transparent so the image shows behind it.
 
 Generate the header from a PNG:
 
@@ -231,7 +236,7 @@ The conversion can be checked without hardware by decoding the generated array t
 
 ### Interaction with the bar band
 
-`drawBar()` needs the background as the base its green fill sits on, so the band sprite is seeded with the matching 480x20 slice of the image at startup and the cleared part of each bar is re-blitted from the image rather than filled black. The delta-push optimisation is unaffected: only the columns between the old and new fill edge still reach the panel.
+`drawBar()` needs the background as the base its green fill sits on, so each band sprite is seeded with the matching 480x20 slice of the image at startup and the cleared part of each bar is re-blitted from the image rather than filled black. The delta-push optimisation is unaffected: only the columns between the old and new fill edge still reach the panel.
 
 ## UART protocol
 
@@ -243,38 +248,48 @@ P:<iris>,<color>,<brightness>,<volume>\n
 
 Values are raw ADS1115 counts. The controller scales them (`processPot()`) and forwards: iris/color/brightness/volume ride the ESP-NOW control packet to j4_receiver, which drives the iris servo and the WS2812B strip and relays volume to j4_talk. Any received `P:` line also marks this board CONNECTED on the controller's connection-status screen.
 
-Downstream (TTGO to this board, on the previously-reserved direction), two line types drive the message band:
+Downstream (TTGO to this board):
 
 ```
-M:<line1>|<line2>\n    show a two-line message (face-preset save prompt, confirmations)
+V:<11 values>\n        the effective face, 25 Hz (see below)
+M:<line1>|<line2>\n    show a message in the header strip ("FACE SAVED TO A" | "SD CARD OK")
 X:\n                   clear it
-I:<0-255>\n            the controller's arbitrated iris value, for the IRIS bar
+I:<0-255>\n            iris only; sent by controllers before v0_6_41, still accepted
 ```
 
-`I:` exists because the IRIS bar sits above the IRIS pot but that pot is only half a last-mover-wins pair: `fader_right` is on the controller, and its `dualPick()` is the only place the winner is known. Drawing the local pot alone would leave the bar sitting still whenever `fader_right` was the active source. The controller sends it at 25 Hz, after its face-preset overlay, so a recalled face reaches the bar too.
+`V:` carries the controller's effective face in `FACES.TXT` order: iris, color, brightness, Eyebrow L, Eyebrow R, Basket Eyebrow L, Basket Eyebrow R, Nose, Nose Basket, Bottom Eyelid L, Bottom Eyelid R. Each is 0-255, or `-1` when the controller has no source for that channel (its ADS1115 is absent and no recalled face is holding it), which draws as `--`. The values are post-arbitration and post-recall, so the screen shows what the servos are actually being sent.
 
-The bar shows whichever source moved last, including with the controller unplugged. While the `I:` feed is live the controller owns the channel and the bar draws its value. Once the feed goes quiet the bar **holds** that value rather than reverting, and switches to the local pot only when the pot is physically moved past `IRIS_TAKEOVER_RAW` (270 counts, which is the controller's `DUAL_CLAIM_COUNTS` of 4/255 expressed in raw counts). The baseline freezes when the feed stops, so a slow turn still claims the channel, matching `dualPick()`'s frozen-baseline takeover.
+- **The eight face pots** (upper area) are read on the controller, so `V:` is their only route here. If it goes quiet for a second they blank to `--` rather than freezing on numbers that look live.
+- **IRIS, COLOR and BRIGHTNESS** (bottom bars) are this board's own pots, but the controller is where the IRIS pot is arbitrated against `fader_right` (`dualPick()`) and where a recalled face overrides all three. So while `V:` is live each of those bars draws the controller's value. Once it goes quiet a bar **holds** that value rather than reverting, and switches to the local pot only when the pot is physically moved past `LINK_TAKEOVER_RAW` (270 counts, the controller's `DUAL_CLAIM_COUNTS` of 4/255 expressed in raw counts). The baseline freezes when the feed stops, so a slow turn still claims the bar, matching `dualPick()`'s frozen-baseline takeover. A `-1` for one of them hands that bar straight back to the local pot.
+- **VOLUME** is not part of a face and always draws the local pot.
 
-The upstream `P:` feed still carries this board's own raw IRIS count unchanged. That is what the controller arbitrates against, so it has to keep flowing regardless of what the bar is drawing.
+The upstream `P:` feed still carries this board's own raw counts unchanged. That is what the controller arbitrates against, so it has to keep flowing regardless of what the bars are drawing.
 
 Anything else is treated as line noise from a floating RX pin and ignored; the buffer is length-capped, and a message self-clears after 15 seconds in case the `X:` gets lost. Message timing is owned by the controller, so this board stays dumb and never blocks on the link.
 
 ## Display layout (480 x 320 landscape)
 
 ```
-+------------------------------------------------+  y=0
-|                     KEVCO                      |  header (44px)
-+------------------------------------------------+  green line
-|                                                |
-|      message band (face-preset prompts)        |
-|                                                |
-+------------------------------------------------+  dim line
-|  [bar]     [bar]      [bar]        [bar]       |  value bars (36px)
-|  IRIS      COLOR      BRIGHTNESS   VOLUME      |  labels (44px)
-+------------------------------------------------+  y=320
++---------------------------------------------------------+  y=0
+|          KEVCO   (or a message: FACE SAVED TO A)        |  header strip (48px)
++---------------------------------------------------------+  green line
+| BASKET BROW L | BASKET BROW R |  EYEBROW L | EYEBROW R   |
+|      123      |      123      |    123     |    123      |  face row 0 (92px)
+|     [bar]     |     [bar]     |   [bar]    |   [bar]     |
+| BTM EYELID L  | BTM EYELID R  |    NOSE    | NOSE BASKET |
+|      123      |      123      |    123     |    123      |  face row 1 (92px)
+|     [bar]     |     [bar]     |   [bar]    |   [bar]     |
++---------------------------------------------------------+  dim line
+|    [bar]         [bar]         [bar]         [bar]      |  value bars (36px)
+|    IRIS          COLOR       BRIGHTNESS      VOLUME     |  labels (44px)
++---------------------------------------------------------+  y=320
 ```
 
-The bar band is the only part of the screen that animates, and it is rendered through a single `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB) holding all four bars. Nothing is ever composed on the glass.
+Messages from the controller take the header strip's place for a few seconds: a large first line ("FACE SAVED TO A", "FACE A RECALLED", "NO FACE ON A") and a smaller second line ("SD CARD OK"). Nothing else on the screen is covered, and KEVCO comes back when the controller clears the message (or after 15s if that clear is lost).
+
+The face cells run in the order of `FACE_CELLS[]` in `main.cpp`; reorder that table if the physical pots sit differently.
+
+Each row of bars is rendered through its own `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB each, three in all: the bottom row and the two face rows). The face numbers are composed in one small 72 x 26 sprite over a copy of the background and pushed in one go. Nothing is ever composed on the glass, and nothing is redrawn unless its value changed.
 
 Sizing that canvas to the band rather than the whole screen is deliberate, and so is pushing only part of it. The ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit and sends it through a per-pixel CPU loop (`pushPixels()` in `Processors/TFT_eSPI_ESP32_S3.c`), and the library's own README lists **ILI9488 (DMA not supported with SPI)**. Push cost is therefore strictly proportional to pixels sent, with no DMA to hide it, and the window in which the panel can be caught mid-update *is* the push duration. Pushing a whole-screen sprite every frame would lengthen that window, not shorten it.
 
@@ -284,7 +299,7 @@ Pushes are wrapped in `startWrite()`/`endWrite()`. The windowed `pushSprite()` r
 
 If `createSprite()` ever fails, `drawBar()` falls back to drawing direct, which tears but keeps the display usable. Setup prints the sprite status over USB CDC.
 
-Each label cell is a quarter of the screen width, centered above its pot. If the image is upside down relative to the panel, change `setRotation(1)` to `setRotation(3)` in `main.cpp`.
+Each cell is a quarter of the screen width; the bottom row is centered above its pot. If the image is upside down relative to the panel, change `setRotation(3)` to `setRotation(1)` in `main.cpp`.
 
 ## Dependencies
 

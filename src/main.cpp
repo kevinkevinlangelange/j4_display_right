@@ -87,12 +87,32 @@
 //                                    3.3V, so TFT_BL is no longer defined at all. Mount
 //                                    is guarded like the ADS1115: probe before use,
 //                                    retry an absent card once a second, never block.
+//                    2026-10-12 -KL  Upper area now shows the eight face pots read on the
+//                                    controller (BASKET BROW L/R, EYEBROW L/R, BTM EYELID
+//                                    L/R, NOSE, NOSE BASKET), each with a number and a bar,
+//                                    over the four bottom bars. The controller sends the
+//                                    whole effective face every 40ms as "V:<11 values>" in
+//                                    FACES.TXT order (iris, color, brightness, 8 face pots;
+//                                    -1 = that pot's module is absent, shown as "--").
+//                                    IRIS, COLOR and BRIGHTNESS bars follow those values,
+//                                    so a recalled face shows on them too; with the
+//                                    controller silent each holds its last value until
+//                                    its own pot moves, as IRIS already did. Messages
+//                                    ("FACE SAVED TO A") move out of the big middle band
+//                                    into the header strip, replacing KEVCO for a few
+//                                    seconds. Link RX buffer 256 -> 4096 so nothing is
+//                                    dropped while the panel or the SD card holds the
+//                                    loop, and an absent card is re-probed every 5s
+//                                    instead of every 1s, since each failed mount stalls
+//                                    the loop for a few hundred ms. "I:" still accepted.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
 //                    potentiometers and acts as an electronic label for them:
 //                    the bottom of the screen shows IRIS, COLOR, BRIGHTNESS, and
-//                    VOLUME (left to right), each with a live value bar.
+//                    VOLUME (left to right), each with a live value bar. The
+//                    upper area shows the eight face pots, which are read on the
+//                    controller and sent here.
 //
 //                    The four pots are read by a dedicated ADS1115 on this
 //                    board's I2C bus (the fifth ADS1115 in the system -- the
@@ -108,21 +128,29 @@
 //                    doubles as this board's heartbeat for the controller's
 //                    connection-status screen.
 //
+//                    Lines FROM the controller:
+//                       "V:<11 values>"   effective face, 0-255 or -1, 25 Hz
+//                       "M:<l1>|<l2>"     show a message in the header strip
+//                       "X:"              clear it
+//                       "FACES?"          dump FACES.TXT as FACE: lines
+//                       "FACESAVE:<..>"   write one face to FACES.TXT
+//                       "I:<0-255>"       iris only (older controllers)
+//
 //
 //      J4_DISPLAY_RIGHT - SeeedStudio XIAO ESP32S3 Pin Connections
 //      ------------------------------------------------------------------
-//      D0 / GPIO1   TFT backlight (HIGH = on)
+//      D0 / GPIO1   microSD CS (card in the TFT module's slot)
 //      D1 / GPIO2   TFT RST
 //      D2 / GPIO3   TFT DC
 //      D3 / GPIO4   TFT CS
 //      D4 / GPIO5   I2C SDA -- ADS1115 (addr 0x48, ADDR pin to GND)
 //      D5 / GPIO6   I2C SCL -- ADS1115
-//      D6 / GPIO43  LINK TX  →  TTGO GPIO26  (TTGO RX)
-//      D7 / GPIO44  LINK RX  ←  TTGO GPIO25  (TTGO TX, face-preset messages:
-//                                             "M:<l1>|<l2>" show, "X:" clear)
-//      D8 / GPIO7   TFT SCLK
-//      D9 / GPIO8   TFT MISO
-//      D10 / GPIO9  TFT MOSI
+//      D6 / GPIO43  LINK TX  →  TTGO GPIO26  (TTGO RX, pot feed + face store)
+//      D7 / GPIO44  LINK RX  ←  TTGO GPIO25  (TTGO TX, values, messages,
+//                                             face store requests)
+//      D8 / GPIO7   TFT SCLK + microSD SCK
+//      D9 / GPIO8   TFT MISO + microSD MISO
+//      D10 / GPIO9  TFT MOSI + microSD MOSI
 //      GND          GND (shared with TTGO GND)
 //      ------------------------------------------------------------------
 //
@@ -135,17 +163,19 @@
 //      DISPLAY LAYOUT  (480 x 320 landscape)
 //      ------------------------------------------------------------------
 //      +------------------------------------------------+  y=0
-//      |                     KEVCO                      |  header (44px)
+//      |      KEVCO   (or a message: FACE SAVED TO A)   |  header (48px)
 //      +------------------------------------------------+  green line
-//      |                                                |
-//      |    message band: face-preset prompts and       |
-//      |    confirmations from the controller           |
-//      |                                                |
+//      | BASKET BROW L| BASKET BROW R|  EYEBROW L |  EYEBROW R  |
+//      |     123      |     123      |    123     |    123      |  row 0
+//      |   [bar]      |   [bar]      |   [bar]    |   [bar]     |
+//      | BTM EYELID L | BTM EYELID R |    NOSE    | NOSE BASKET |
+//      |     123      |     123      |    123     |    123      |  row 1
+//      |   [bar]      |   [bar]      |   [bar]    |   [bar]     |
 //      +------------------------------------------------+  dim line
 //      |  [bar]     [bar]      [bar]        [bar]       |  value bars (36px)
 //      |  IRIS      COLOR      BRIGHTNESS   VOLUME      |  labels (44px)
 //      +------------------------------------------------+  y=320
-//      Each label cell is a quarter of the width, centered over its pot.
+//      Each cell is a quarter of the width; the bottom row sits over its pot.
 //      ------------------------------------------------------------------
 //******************************************************************************
 
@@ -173,16 +203,20 @@
 // -----------------------------------------------------------------------------
 //  UART LINK (to the TTGO controller)
 // -----------------------------------------------------------------------------
-#define LINK_RX    44      // D7 receives from TTGO GPIO25 (face-preset messages)
+#define LINK_RX    44      // D7 receives from TTGO GPIO25
 #define LINK_TX    43      // D6 sends to   TTGO GPIO26
 #define LINK_BAUD  115200
+// The controller sends ~50 bytes every 40ms. A message repaint or an SD mount
+// attempt can hold loop() for a few hundred ms, and the 256-byte default
+// buffer would drop lines in that time. Must be set before begin().
+#define LINK_RX_BUF  4096
 
 #define POT_TX_INTERVAL_MS  40   // 25 Hz, matches the controller's control loop
 
 // Message overlay: "M:<line1>|<line2>" shows, "X:" clears. Anything else on
 // the link is ignored (a floating RX pin streams garbage when the TTGO is
 // unplugged). If the controller's "X:" is ever lost, the message self-clears.
-#define MSG_MAX_LEN          40   // per line, fits font 4 across the band
+#define MSG_MAX_LEN          40   // per line
 #define MSG_SAFETY_CLEAR_MS  15000
 
 
@@ -235,21 +269,49 @@ bool adsReady() {
 // a 3.3V pot on a gain-0 ADS1115 tops out around 17000 counts).
 #define POT_RAW_MAX  17000
 
-// Arbitrated IRIS value from the controller ("I:<0-255>"). The IRIS pot below
-// this screen and fader_right on the controller are a last-mover-wins pair,
-// and dualPick() over there is the only place that result exists, so the bar
-// has to be told rather than derive it. While the feed is fresh the IRIS bar
-// draws this instead of the local pot, which is what makes the bar follow
-// fader_right. If the controller goes quiet the bar falls back to this board's
-// own pot, so the display still works standalone.
-#define IRIS_LINK_MAX         255
-#define IRIS_LINK_SILENT_MS   500   // 12 missed frames at the controller's 25 Hz
-// Local-pot takeover once the controller has gone quiet. The bar holds the
-// last arbitrated value until this pot itself moves, rather than snapping back
-// to it, so "whichever moved last" still holds with the controller unplugged.
-// 270 raw counts is DUAL_CLAIM_COUNTS (4 on the controller's 0-255 scale)
-// expressed in this board's raw counts: 4 / 255 * 17000.
-#define IRIS_TAKEOVER_RAW     270
+
+// -----------------------------------------------------------------------------
+//  VALUES FROM THE CONTROLLER ("V:" lines)
+//
+//  The whole effective face, in FACES.TXT order. The eight face pots are read
+//  on the controller, so this is the only way they reach this screen. IRIS,
+//  COLOR and BRIGHTNESS are this board's own pots, but the controller is where
+//  the iris pot is arbitrated against fader_right and where a recalled face
+//  overrides all three, so their bars draw the controller's value while it is
+//  streaming.
+//
+//  If the controller goes quiet, the eight face values blank to "--" (the
+//  pots are not here, so a frozen number would only look live), and each
+//  bottom bar holds its last value until its own pot is physically moved,
+//  rather than snapping back to the pot. That keeps "whichever moved last"
+//  true with the controller unplugged.
+// -----------------------------------------------------------------------------
+#define FACE_VALUES        11
+enum {
+  FI_IRIS = 0, FI_COLOR, FI_BRIGHT,
+  FI_BROW_L, FI_BROW_R, FI_BBROW_L, FI_BBROW_R,
+  FI_NOSE, FI_NOSE_BASKET, FI_LID_L, FI_LID_R
+};
+#define LINK_VAL_MAX       255
+#define LINK_SILENT_MS     500    // 12 missed frames at the controller's 25 Hz
+#define FACE_VAL_STALE_MS  1000   // face numbers blank to "--" after this
+// Local-pot takeover once the controller has gone quiet. 270 raw counts is
+// DUAL_CLAIM_COUNTS (4 on the controller's 0-255 scale) in this board's raw
+// counts: 4 / 255 * 17000.
+#define LINK_TAKEOVER_RAW  270
+
+int16_t       faceVal[FACE_VALUES];        // last V: values, -1 = absent
+unsigned long faceValAt = 0;               // when the last V: landed
+bool          faceValSeen = false;
+
+// Bottom bars IRIS/COLOR/BRIGHTNESS (index = CH_*). linkHold[c] means the bar
+// shows linkVal[c] rather than the local pot; it is set by the controller's
+// value and cleared only when the local pot moves after the controller has
+// gone quiet (or the controller reports that channel absent).
+int16_t       linkVal[3]     = { 0, 0, 0 };
+bool          linkHold[3]    = { false, false, false };
+unsigned long linkAt[3]      = { 0, 0, 0 };
+int16_t       linkPotBase[3] = { 0, 0, 0 };  // local raw when the link went quiet
 
 
 // -----------------------------------------------------------------------------
@@ -271,16 +333,20 @@ bool adsReady() {
 //
 //  Same on-card format the Teensy used, one CSV line per face:
 //      <key>,<v0>,..,<v10>,<toggles>
-//  so a card can be moved between the two without conversion.
+//  so a card can be moved between the two without conversion. The card must
+//  be FAT32 (or FAT16); exFAT does not mount.
 // -----------------------------------------------------------------------------
 #define FACES_PATH       "/FACES.TXT"
-#define FACE_VALUES      11
 #define FACE_MAX         16
 #define FACE_LINE_MAX    72
-#define SD_REPROBE_MS    1000     // same pattern as the ADS presence guard
+// A failed mount (no card) runs the SD library's init retries at 400 kHz and
+// holds loop() for a few hundred ms, so an absent card is only retried this
+// often. A present card mounts once and is never probed again.
+#define SD_REPROBE_MS    5000
 #define SD_SPI_HZ        4000000  // conservative: the TFT runs this bus at 20MHz
 
 bool          sd_mounted    = false;
+bool          sd_probedOnce = false;
 unsigned long sdProbe_previousMillis = 0;
 
 
@@ -295,31 +361,61 @@ unsigned long sdProbe_previousMillis = 0;
 
 // -----------------------------------------------------------------------------
 //  LAYOUT  (480 x 320 landscape)
-//  If the display appears upside down, change setRotation(1) to setRotation(3).
+//  If the display appears upside down, change setRotation(3) to setRotation(1).
 // -----------------------------------------------------------------------------
 #define SCREEN_W  480
 #define SCREEN_H  320
 
 #define HDR_Y       0
-#define HDR_H      44
+#define HDR_H      48                        // KEVCO, or the current message
 
 #define LBL_H      44                        // label strip at the very bottom
 #define LBL_Y      (SCREEN_H - LBL_H)
 #define BAR_H      36                        // value bars above the labels
 #define BAR_Y      (LBL_Y - BAR_H)
-#define CELL_W     (SCREEN_W / 4)            // 120px per pot cell
+#define CELL_W     (SCREEN_W / 4)            // 120px per cell
 
 #define BAR_PAD    18                        // bar inset from the cell edges
 #define BAR_INNER  (CELL_W - 2 * BAR_PAD)    // drawable bar width
 
-// The bar band: the only part of the screen that animates. One sprite spans
-// all four bars so they share a single canvas, and pushes come out of it.
-#define BAR_BAND_Y  (BAR_Y + 8)              // band top on the panel
+// Every bar lives in a 480 x 20 band sprite, one sprite per row of bars, and
+// pushes come out of it.
 #define BAR_BAND_H  (BAR_H - 16)             // 20px, outline included
 #define BAR_FILL_Y  2                        // fill inset inside the band
 #define BAR_FILL_H  (BAR_H - 20)             // 16px of green/background
+#define BOT_BAND_Y  (BAR_Y + 8)              // bottom band top on the panel
+
+// Face pot grid: two rows of four cells between the header and the bottom
+// bars. Offsets are from the top of each row.
+#define FACE_Y0        (HDR_H + 4)           // 52
+#define FACE_ROW_H     92                    // two rows end at 236
+#define FACE_LBL_DY    12                    // label centre
+#define FACE_NUM_DY    40                    // number centre
+#define FACE_BAND_DY   60                    // bar band top
+#define FACE_ROW_Y(r)  (FACE_Y0 + (r) * FACE_ROW_H)
+
+// Number canvas: one small sprite reused for every face value.
+#define NUM_W  72
+#define NUM_H  26                            // font 4 height
 
 const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
+
+// The upper area, left to right, top row first. fi = index into the V: line.
+// Reorder these to match the physical pots if they sit differently.
+struct FaceCell { const char *label; uint8_t fi; };
+const FaceCell FACE_CELLS[8] = {
+  { "BASKET BROW L", FI_BBROW_L }, { "BASKET BROW R", FI_BBROW_R },
+  { "EYEBROW L",     FI_BROW_L  }, { "EYEBROW R",     FI_BROW_R  },
+  { "BTM EYELID L",  FI_LID_L   }, { "BTM EYELID R",  FI_LID_R   },
+  { "NOSE",          FI_NOSE    }, { "NOSE BASKET",   FI_NOSE_BASKET },
+};
+
+// Bars 0-3 are the bottom row (CH_* order), 4-11 the face cells in
+// FACE_CELLS order. Band 0 is the bottom row, bands 1 and 2 the face rows.
+#define NUM_BARS   12
+#define NUM_BANDS   3
+static inline uint8_t barBand(uint8_t i) { return i < 4 ? 0 : (i < 8 ? 1 : 2); }
+static inline uint8_t barCol(uint8_t i)  { return i < 4 ? i : (i - 4) % 4; }
 
 
 // -----------------------------------------------------------------------------
@@ -327,10 +423,10 @@ const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 // -----------------------------------------------------------------------------
 TFT_eSPI tft = TFT_eSPI();
 
-// Off-screen canvas for the whole bar band (480 x 20 at 16bpp, 19.2KB). All
-// four bars live in it, so nothing is ever composed on the glass itself.
+// Off-screen canvases for the bar bands (480 x 20 at 16bpp, 19.2KB each). All
+// bars are composed in these, so nothing is ever composed on the glass itself.
 //
-// Sizing this to the band rather than to the whole screen is deliberate. The
+// Sizing these to a band rather than to the whole screen is deliberate. The
 // ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit
 // and pushes it through a per-pixel CPU loop (pushPixels() in
 // Processors/TFT_eSPI_ESP32_S3.c), and the library's own README lists
@@ -338,23 +434,25 @@ TFT_eSPI tft = TFT_eSPI();
 // proportional to pixels sent, with nothing to hide it behind, and the window
 // in which the panel can be caught mid-update IS the push duration. Pushing a
 // whole-screen sprite every frame would make the tearing worse, not better.
-TFT_eSprite barBand   = TFT_eSprite(&tft);
-bool        barBandOk = false;   // false = allocation failed, draw direct
+TFT_eSprite bandBot   = TFT_eSprite(&tft);
+TFT_eSprite bandFace0 = TFT_eSprite(&tft);
+TFT_eSprite bandFace1 = TFT_eSprite(&tft);
+TFT_eSprite  *bandSpr[NUM_BANDS] = { &bandBot, &bandFace0, &bandFace1 };
+const int16_t bandY[NUM_BANDS]   = { BOT_BAND_Y,
+                                     FACE_ROW_Y(0) + FACE_BAND_DY,
+                                     FACE_ROW_Y(1) + FACE_BAND_DY };
+bool          bandOk[NUM_BANDS]  = { false, false, false };  // false = draw direct
 
-int16_t potRaw[4]  = { 0, 0, 0, 0 };
-int16_t potBarPx[4] = { -1, -1, -1, -1 };   // last drawn bar width (-1 = force draw)
+TFT_eSprite numSpr   = TFT_eSprite(&tft);
+bool        numSprOk = false;
 
-// Arbitrated iris from the controller. irisHold means the bar is showing that
-// value rather than the local pot; it is set by an "I:" line and cleared only
-// when the local pot moves after the controller has gone quiet.
-int           irisLink    = 0;
-bool          irisHold    = false;
-unsigned long irisLinkAt  = 0;
-int16_t       irisPotBase = 0;      // local raw at the moment the link went quiet
+int16_t potRaw[4]          = { 0, 0, 0, 0 };
+int16_t barPx[NUM_BARS];                   // last drawn fill width, -1 = force
+int16_t numShown[8];                       // last drawn face number, -2 = force
 
 unsigned long potTx_previousMillis = 0;
 
-// Message overlay state
+// Message state (shown in the header strip)
 char          msgLine1[MSG_MAX_LEN + 1] = "";
 char          msgLine2[MSG_MAX_LEN + 1] = "";
 bool          msgShown   = false;
@@ -363,18 +461,20 @@ String        linkBuf    = "";
 
 
 // -----------------------------------------------------------------------------
-//  DRAWING
+//  MICROSD FACE STORE
 // -----------------------------------------------------------------------------
 
 // Mount guard, same shape as adsReady(): probe before use, and only retry an
-// absent card once a second so a missing or dead card never stalls the pot
-// feed. Returns false if there is no usable card, and every caller treats that
-// as "no store available" rather than an error worth blocking on.
+// absent card every SD_REPROBE_MS so a missing or dead card never stalls the
+// pot feed for long. Returns false if there is no usable card, and every
+// caller treats that as "no store available" rather than an error worth
+// blocking on.
 bool sdReady() {
   if (sd_mounted) return true;
 
   unsigned long now = millis();
-  if (now - sdProbe_previousMillis < SD_REPROBE_MS) return false;
+  if (sd_probedOnce && now - sdProbe_previousMillis < SD_REPROBE_MS) return false;
+  sd_probedOnce = true;
   sdProbe_previousMillis = now;
 
   // Hand SD the instance TFT_eSPI actually drives this bus with.
@@ -398,7 +498,20 @@ void facesSendDump() {
   if (!sdReady()) { Serial1.print(F("FACE_END:-1\n")); return; }
 
   File f = SD.open(FACES_PATH, FILE_READ);
-  if (!f) { Serial1.print(F("FACE_END:0\n")); return; }   // mounted, no file yet
+  if (!f) {
+    // Mounted with no file yet, or the card was pulled since it mounted. Tell
+    // the two apart, so a pulled card reads as "no card" and is re-probed.
+    File root = SD.open("/");
+    if (!root) {
+      sd_mounted = false;
+      SD.end();
+      Serial1.print(F("FACE_END:-1\n"));
+      return;
+    }
+    root.close();
+    Serial1.print(F("FACE_END:0\n"));
+    return;
+  }
 
   uint8_t n = 0;
   char    line[FACE_LINE_MAX + 1];
@@ -450,6 +563,7 @@ void faceSaveToSD(const char *body) {
   File out = SD.open(FACES_PATH, FILE_WRITE);
   if (!out) {
     sd_mounted = false;             // card pulled or gone bad, re-probe later
+    SD.end();
     Serial1.printf("FACEERR:%c\n", key);
     return;
   }
@@ -459,10 +573,14 @@ void faceSaveToSD(const char *body) {
   if (out.printf("%s\n", body) <= 0) ok = false;
   out.close();
 
-  if (!ok) sd_mounted = false;
+  if (!ok) { sd_mounted = false; SD.end(); }
   Serial1.printf(ok ? "FACEOK:%c\n" : "FACEERR:%c\n", key);
 }
 
+
+// -----------------------------------------------------------------------------
+//  DRAWING
+// -----------------------------------------------------------------------------
 
 // Blit a rectangle of the background image straight to the panel.
 //
@@ -501,30 +619,37 @@ void bgToPanel(int16_t x, int16_t y, int16_t w, int16_t h) {
 }
 
 
-// Same, but into the bar band sprite. Coordinates are band-relative, so this
-// offsets into the image by BAR_BAND_Y. RAM to RAM, no panel traffic: the
-// sprite keeps swapBytes false so each row is a straight memcpy.
-static void bgToBand(int16_t x, int16_t y, int16_t w, int16_t h) {
+// Same, but into a sprite whose top-left sits at panel (sx, sy). Coordinates
+// are sprite-relative. RAM to RAM, no panel traffic: the sprites keep
+// swapBytes false so each row is a straight memcpy.
+static void bgToSprite(TFT_eSprite &spr, int16_t sx, int16_t sy,
+                       int16_t x, int16_t y, int16_t w, int16_t h) {
 #if HAVE_BG
-  if (x == 0 && w == SCREEN_W) {
-    barBand.pushImage(0, y, SCREEN_W, h,
-                      &BG_IMAGE[(uint32_t)(BAR_BAND_Y + y) * SCREEN_W]);
-  } else {
-    for (int16_t r = 0; r < h; r++)
-      barBand.pushImage(x, y + r, w, 1,
-                        &BG_IMAGE[(uint32_t)(BAR_BAND_Y + y + r) * SCREEN_W + x]);
-  }
+  for (int16_t r = 0; r < h; r++)
+    spr.pushImage(x, y + r, w, 1,
+                  &BG_IMAGE[(uint32_t)(sy + y + r) * SCREEN_W + sx + x]);
 #else
-  barBand.fillRect(x, y, w, h, C_BG);
+  spr.fillRect(x, y, w, h, C_BG);
 #endif
 }
 
 
+// Header strip: "KEVCO", or the current message in its place. A message is a
+// big first line and an optional smaller second line, so "FACE SAVED TO A" is
+// easy to read from arm's length without covering any value on the screen.
 void drawHeader() {
   bgToPanel(0, HDR_Y, SCREEN_W, HDR_H);
   tft.setTextColor(C_GREEN);   // single argument = transparent, keeps the image
   tft.setTextDatum(MC_DATUM);
-  tft.drawString("KEVCO", SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+  if (!msgShown) {
+    tft.drawString("KEVCO", SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+  } else if (msgLine2[0] == '\0') {
+    tft.drawString(msgLine1, SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+  } else {
+    tft.drawString(msgLine1, SCREEN_W / 2, HDR_Y + 17, 4);
+    tft.setTextColor(TFT_WHITE);
+    tft.drawString(msgLine2, SCREEN_W / 2, HDR_Y + 39, 2);
+  }
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -542,23 +667,47 @@ void drawLabels() {
 }
 
 
-// Fill width for one channel, already clamped to what a bar can show.
-// IRIS shows whichever source moved last: the controller's arbitrated value
-// while it is streaming, which is how the bar tracks fader_right, otherwise
-// the local pot. Every other channel is always local.
+// Static parts of the face grid: labels, cell dividers, the line between rows.
+void drawFaceLabels() {
+  tft.setTextDatum(MC_DATUM);
+  for (uint8_t k = 0; k < 8; k++) {
+    uint8_t r  = k / 4, c = k % 4;
+    int16_t cx = c * CELL_W + CELL_W / 2;
+    tft.setTextColor(C_GREEN);
+    tft.drawString(FACE_CELLS[k].label, cx, FACE_ROW_Y(r) + FACE_LBL_DY, 2);
+    if (c > 0) tft.drawFastVLine(c * CELL_W, FACE_ROW_Y(r) + 4, FACE_ROW_H - 8, C_DIM);
+  }
+  tft.drawFastHLine(12, FACE_ROW_Y(1) - 1, SCREEN_W - 24, C_DIM);
+  tft.setTextDatum(TL_DATUM);
+}
+
+
+// Current value of a face channel for display, -1 = unknown ("--"): the
+// controller has gone quiet, or it reports that pot's module absent.
+static int16_t faceValNow(uint8_t fi) {
+  if (!faceValSeen || millis() - faceValAt >= FACE_VAL_STALE_MS) return -1;
+  return faceVal[fi];
+}
+
+
+// Fill width for one bar, already clamped to what a bar can show.
 static int16_t barFillPx(uint8_t i) {
   int32_t px;
-  if (i == CH_IRIS && irisHold)
-    px = (int32_t)constrain(irisLink, 0, IRIS_LINK_MAX) * BAR_INNER / IRIS_LINK_MAX;
-  else
+  if (i >= 4) {
+    int16_t v = faceValNow(FACE_CELLS[i - 4].fi);
+    px = v < 0 ? 0 : (int32_t)v * BAR_INNER / LINK_VAL_MAX;
+  } else if (i < 3 && linkHold[i]) {
+    px = (int32_t)constrain(linkVal[i], 0, LINK_VAL_MAX) * BAR_INNER / LINK_VAL_MAX;
+  } else {
     px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
+  }
   return (int16_t)constrain(px, 0, BAR_INNER - 4);
 }
 
 
-// One pot's live value bar.
+// One live value bar.
 //
-// The bar is composed in the band sprite and only the columns that actually
+// The bar is composed in its band sprite and only the columns that actually
 // changed are pushed to the panel. Sweeping a pot moves the fill edge a few
 // pixels per frame, so a typical update is a sliver maybe 15 x 16 rather than
 // the whole 84 x 20 bar: about a sixth of the bytes, and the tear window
@@ -568,25 +717,27 @@ static int16_t barFillPx(uint8_t i) {
 // force redraws the bar complete, outline included. Used for the first paint.
 void drawBar(uint8_t i, bool force = false) {
   int16_t fill = barFillPx(i);
-  int16_t prev = potBarPx[i];
+  int16_t prev = barPx[i];
   if (!force && fill == prev) return;   // unchanged, nothing to send
-  potBarPx[i] = fill;
+  barPx[i] = fill;
 
-  int16_t bx = i * CELL_W + BAR_PAD;    // bar origin, same x on panel and band
+  uint8_t      b   = barBand(i);
+  TFT_eSprite &spr = *bandSpr[b];
+  int16_t      by  = bandY[b];
+  int16_t      bx  = barCol(i) * CELL_W + BAR_PAD;   // same x on panel and band
 
-  if (!barBandOk) {
+  if (!bandOk[b]) {
     // Sprite allocation failed. Draw straight to the panel: it tears, but the
     // display stays usable rather than going blank.
-    tft.drawRect(bx, BAR_BAND_Y, BAR_INNER, BAR_BAND_H, C_DIM);
-    tft.fillRect(bx + 2, BAR_BAND_Y + BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
-    bgToPanel(bx + 2 + fill, BAR_BAND_Y + BAR_FILL_Y,
-              BAR_INNER - 4 - fill, BAR_FILL_H);
+    tft.drawRect(bx, by, BAR_INNER, BAR_BAND_H, C_DIM);
+    tft.fillRect(bx + 2, by + BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
+    bgToPanel(bx + 2 + fill, by + BAR_FILL_Y, BAR_INNER - 4 - fill, BAR_FILL_H);
     return;
   }
 
   // Compose into the canvas. No panel traffic in this part.
-  barBand.fillRect(bx + 2, BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
-  bgToBand(bx + 2 + fill, BAR_FILL_Y, BAR_INNER - 4 - fill, BAR_FILL_H);
+  spr.fillRect(bx + 2, BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
+  bgToSprite(spr, 0, by, bx + 2 + fill, BAR_FILL_Y, BAR_INNER - 4 - fill, BAR_FILL_H);
 
   // startWrite()/endWrite() wrap every push. The windowed pushSprite() renders
   // line by line and, unlike its 1bpp and 4bpp branches, its 16bpp branch does
@@ -594,42 +745,97 @@ void drawBar(uint8_t i, bool force = false) {
   // row would be its own SPI transaction with its own window command.
   tft.startWrite();
   if (force || prev < 0) {
-    barBand.drawRect(bx, 0, BAR_INNER, BAR_BAND_H, C_DIM);
-    barBand.pushSprite(bx, BAR_BAND_Y, bx, 0, BAR_INNER, BAR_BAND_H);
+    spr.drawRect(bx, 0, BAR_INNER, BAR_BAND_H, C_DIM);
+    spr.pushSprite(bx, by, bx, 0, BAR_INNER, BAR_BAND_H);
   } else {
     // Only the columns between the old and new fill edges differ. The outline
     // is static and sits outside the fill rows, so it never needs resending.
     int16_t lo = prev < fill ? prev : fill;
     int16_t hi = prev < fill ? fill : prev;
-    barBand.pushSprite(bx + 2 + lo, BAR_BAND_Y + BAR_FILL_Y,
-                       bx + 2 + lo, BAR_FILL_Y, hi - lo, BAR_FILL_H);
+    spr.pushSprite(bx + 2 + lo, by + BAR_FILL_Y,
+                   bx + 2 + lo, BAR_FILL_Y, hi - lo, BAR_FILL_H);
   }
   tft.endWrite();
 }
 
 
-// Message band between the header and the bars: face-preset prompts and
-// confirmations sent by the controller.
-#define MSG_Y  (HDR_H + 2)
-#define MSG_H  (BAR_Y - 4 - MSG_Y)
+// One face cell's number, composed in numSpr over the background and pushed
+// in one go so it never flickers through an empty frame.
+void drawFaceNumber(uint8_t k, bool force = false) {
+  int16_t v = faceValNow(FACE_CELLS[k].fi);
+  if (!force && v == numShown[k]) return;
+  numShown[k] = v;
 
-void drawMessage() {
-  bgToPanel(0, MSG_Y, SCREEN_W, MSG_H);
-  if (!msgShown) return;
-  int16_t cy = MSG_Y + MSG_H / 2;
-  tft.drawRect(20, MSG_Y + 12, SCREEN_W - 40, MSG_H - 24, C_GREEN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_GREEN);   // transparent over the background image
-  tft.drawString(msgLine1, SCREEN_W / 2, cy - 26, 4);
-  tft.drawString(msgLine2, SCREEN_W / 2, cy + 26, 4);
-  tft.setTextDatum(TL_DATUM);
+  char txt[6];
+  if (v < 0) strcpy(txt, "--");
+  else       snprintf(txt, sizeof(txt), "%d", v);
+
+  int16_t cx = (k % 4) * CELL_W + CELL_W / 2;
+  int16_t nx = cx - NUM_W / 2;
+  int16_t ny = FACE_ROW_Y(k / 4) + FACE_NUM_DY - NUM_H / 2;
+
+  if (!numSprOk) {
+    bgToPanel(nx, ny, NUM_W, NUM_H);
+    tft.setTextColor(C_GREEN);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(txt, cx, ny + NUM_H / 2, 4);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+  bgToSprite(numSpr, nx, ny, 0, 0, NUM_W, NUM_H);
+  numSpr.setTextColor(C_GREEN);   // transparent over the background copy
+  numSpr.setTextDatum(MC_DATUM);
+  numSpr.drawString(txt, NUM_W / 2, NUM_H / 2, 4);
+  tft.startWrite();
+  numSpr.pushSprite(nx, ny);
+  tft.endWrite();
 }
 
-// One complete line from the TTGO. Only "M:", "X:", "I:", "FACES?" and
-// "FACESAVE:" are real; everything else is line noise from a floating RX pin
-// and is dropped.
+
+// Parse "V:<11 comma-separated values>", each -1..255. Anything else is line
+// noise and changes nothing.
+bool parseValues(const String &body, int16_t *out) {
+  int v[FACE_VALUES];
+  char tail;
+  int n = sscanf(body.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%c",
+                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &tail);
+  if (n != FACE_VALUES) return false;          // short, or trailing junk
+  for (uint8_t i = 0; i < FACE_VALUES; i++) {
+    if (v[i] < -1 || v[i] > LINK_VAL_MAX) return false;
+    out[i] = (int16_t)v[i];
+  }
+  return true;
+}
+
+
+// The controller's value for one bottom channel (CH_IRIS..CH_BRIGHTNESS).
+// -1 means the controller has no source for it, so the local pot is the
+// truth and the bar goes back to drawing it.
+static void linkSet(uint8_t c, int16_t v, unsigned long now) {
+  if (v < 0) { linkHold[c] = false; return; }
+  linkVal[c]  = v;
+  linkHold[c] = true;
+  linkAt[c]   = now;
+}
+
+
+// One complete line from the TTGO. Only "V:", "M:", "X:", "FACES?",
+// "FACESAVE:" and "I:" are real; everything else is line noise from a
+// floating RX pin and is dropped.
 void handleLinkLine(const String &line) {
-  if (line.startsWith("M:")) {
+  unsigned long now = millis();
+  if (line.startsWith("V:")) {
+    int16_t v[FACE_VALUES];
+    if (parseValues(line.substring(2), v)) {
+      memcpy(faceVal, v, sizeof(faceVal));
+      faceValAt   = now;
+      faceValSeen = true;
+      linkSet(CH_IRIS,       v[FI_IRIS],   now);
+      linkSet(CH_COLOR,      v[FI_COLOR],  now);
+      linkSet(CH_BRIGHTNESS, v[FI_BRIGHT], now);
+    }
+  } else if (line.startsWith("M:")) {
     String body = line.substring(2);
     int sep = body.indexOf('|');
     String l1 = (sep >= 0) ? body.substring(0, sep) : body;
@@ -637,12 +843,12 @@ void handleLinkLine(const String &line) {
     strncpy(msgLine1, l1.c_str(), MSG_MAX_LEN); msgLine1[MSG_MAX_LEN] = '\0';
     strncpy(msgLine2, l2.c_str(), MSG_MAX_LEN); msgLine2[MSG_MAX_LEN] = '\0';
     msgShown   = true;
-    msgShownAt = millis();
-    drawMessage();
+    msgShownAt = now;
+    drawHeader();
   } else if (line.startsWith("X:")) {
     if (msgShown) {
       msgShown = false;
-      drawMessage();
+      drawHeader();
     }
   } else if (line.startsWith("FACES?")) {
     facesSendDump();
@@ -657,19 +863,15 @@ void handleLinkLine(const String &line) {
       faceSaveToSD(body.c_str());
     }
   } else if (line.startsWith("I:")) {
-    // Digits only, 1 to 3 of them, in range. toInt() alone would read garbage
-    // off a floating RX pin as 0 and slam the bar shut once per noise burst.
+    // Older controllers send only the arbitrated iris. Digits only, 1 to 3 of
+    // them, in range: toInt() alone would read garbage as 0.
     String body = line.substring(2);
     if (body.length() >= 1 && body.length() <= 3) {
       bool digits = true;
       for (uint16_t k = 0; k < body.length(); k++)
         if (!isDigit(body[k])) { digits = false; break; }
       long v = digits ? body.toInt() : -1;
-      if (v >= 0 && v <= IRIS_LINK_MAX) {
-        irisLink   = (int)v;
-        irisHold   = true;
-        irisLinkAt = millis();
-      }
+      if (v >= 0 && v <= LINK_VAL_MAX) linkSet(CH_IRIS, (int16_t)v, now);
     }
   }
 }
@@ -678,10 +880,11 @@ void drawScreen() {
   bgToPanel(0, 0, SCREEN_W, SCREEN_H);
   drawHeader();
   tft.drawFastHLine(0, HDR_H, SCREEN_W, C_GREEN);
+  drawFaceLabels();
   tft.drawFastHLine(0, BAR_Y - 2, SCREEN_W, C_DIM);
   drawLabels();
-  drawMessage();
-  for (uint8_t i = 0; i < 4; i++) drawBar(i, true);
+  for (uint8_t i = 0; i < NUM_BARS; i++) drawBar(i, true);
+  for (uint8_t k = 0; k < 8; k++) drawFaceNumber(k, true);
 }
 
 
@@ -690,7 +893,12 @@ void drawScreen() {
 // -----------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  Serial1.setRxBufferSize(LINK_RX_BUF);   // before begin(), or it is ignored
   Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX, LINK_TX);
+
+  for (uint8_t i = 0; i < FACE_VALUES; i++) faceVal[i] = -1;
+  for (uint8_t i = 0; i < NUM_BARS; i++)    barPx[i]   = -1;
+  for (uint8_t k = 0; k < 8; k++)           numShown[k] = -2;
 
   // ADS1115 on the XIAO's native I2C pins (D4/D5 = GPIO5/6). Probed via
   // adsReady() before every read: the ADS1X15 library's readADC() has no
@@ -711,43 +919,44 @@ void setup() {
   tft.setSwapBytes(true);
 
   // Must come after tft.init(). createSprite() returns NULL if the allocation
-  // fails, in which case drawBar() falls back to drawing direct.
-  barBand.setColorDepth(16);
-  barBandOk = (barBand.createSprite(SCREEN_W, BAR_BAND_H) != NULL);
-  if (barBandOk) {
-    // swapBytes false so pushImage into the sprite is a straight per-row
-    // memcpy. The image is generated in sprite-native (byte-swapped) order, so
-    // it drops straight in with no conversion.
-    barBand.setSwapBytes(false);
-    // Seed the canvas with the image. The fill is only here so the sprite is
-    // in a known state if the image is ever missing; bgToBand overwrites every
-    // pixel of it immediately below.
-    barBand.fillSprite(C_BG);
-    bgToBand(0, 0, SCREEN_W, BAR_BAND_H);
+  // fails, in which case drawing falls back to the panel directly.
+  for (uint8_t b = 0; b < NUM_BANDS; b++) {
+    TFT_eSprite &spr = *bandSpr[b];
+    spr.setColorDepth(16);
+    bandOk[b] = (spr.createSprite(SCREEN_W, BAR_BAND_H) != NULL);
+    if (bandOk[b]) {
+      // swapBytes false so pushImage into the sprite is a straight per-row
+      // memcpy. The image is generated in sprite-native (byte-swapped) order,
+      // so it drops straight in with no conversion.
+      spr.setSwapBytes(false);
+      spr.fillSprite(C_BG);   // known state if the image is ever missing
+      bgToSprite(spr, 0, bandY[b], 0, 0, SCREEN_W, BAR_BAND_H);
+    }
+    Serial.printf("bar band %u sprite %s\n", b, bandOk[b] ? "ready" : "FAILED, drawing direct");
   }
-  Serial.printf("bar band sprite %s (%d x %d, %d bytes)\n",
-                barBandOk ? "ready" : "FAILED, drawing direct",
-                SCREEN_W, BAR_BAND_H, SCREEN_W * BAR_BAND_H * 2);
+  numSpr.setColorDepth(16);
+  numSprOk = (numSpr.createSprite(NUM_W, NUM_H) != NULL);
+  if (numSprOk) numSpr.setSwapBytes(false);
 
   drawScreen();
 
   // Mount the card last: it shares the TFT's SPI bus, so tft.init() must have
   // configured that bus first. A missing card is not an error here, sdReady()
-  // keeps retrying once a second and the controller runs from its NVS copy in
-  // the meantime.
+  // keeps retrying every few seconds and the controller runs from its NVS
+  // copy in the meantime.
   Serial.printf("microSD on CS=%d: %s\n", SD_CS_PIN,
                 sdReady() ? "mounted" : "absent, will retry");
 }
 
 
 // -----------------------------------------------------------------------------
-//  MAIN LOOP -- read the four pots, refresh the bars, stream to the TTGO.
+//  MAIN LOOP -- read the four pots, refresh the screen, stream to the TTGO.
 // -----------------------------------------------------------------------------
 void loop() {
   unsigned long now = millis();
 
-  // Messages from the TTGO (face-preset prompts/confirmations). Length guard
-  // caps floating-RX garbage; only recognized lines do anything.
+  // Lines from the TTGO. Length guard caps floating-RX garbage; only
+  // recognized lines do anything.
   while (Serial1.available()) {
     char c = (char)Serial1.read();
     if (c == '\n') {
@@ -763,7 +972,7 @@ void loop() {
   // Self-clear a stale message in case the controller's "X:" got lost.
   if (msgShown && now - msgShownAt >= MSG_SAFETY_CLEAR_MS) {
     msgShown = false;
-    drawMessage();
+    drawHeader();
   }
 
 
@@ -779,19 +988,20 @@ void loop() {
       potRaw[CH_IRIS] = potRaw[CH_COLOR] = potRaw[CH_BRIGHTNESS] = potRaw[CH_VOLUME] = 0;
     }
 
-    // IRIS ownership. While the controller is streaming it owns the channel
-    // (its dualPick() already arbitrates this pot against fader_right), so
-    // just track the pot to keep the takeover baseline current. Once the
-    // stream stops the baseline freezes and the bar keeps showing the last
-    // arbitrated value, which is still the most recent adjustment, until this
-    // pot is physically moved past the threshold. Measuring against a frozen
-    // baseline rather than the previous sample means a slow turn still claims
-    // the channel, same as dualPick() on the controller.
-    if (irisHold) {
-      if (now - irisLinkAt < IRIS_LINK_SILENT_MS) {
-        irisPotBase = potRaw[CH_IRIS];
-      } else if (abs(potRaw[CH_IRIS] - irisPotBase) > IRIS_TAKEOVER_RAW) {
-        irisHold = false;
+    // Bottom-bar ownership for IRIS/COLOR/BRIGHTNESS. While the controller is
+    // streaming it owns the bar, so just track the pot to keep the takeover
+    // baseline current. Once the stream stops the baseline freezes and the bar
+    // keeps showing the last controller value, which is still the most recent
+    // adjustment, until this pot is physically moved past the threshold.
+    // Measuring against a frozen baseline rather than the previous sample
+    // means a slow turn still claims the bar, same as dualPick() on the
+    // controller.
+    for (uint8_t c = 0; c < 3; c++) {
+      if (!linkHold[c]) continue;
+      if (now - linkAt[c] < LINK_SILENT_MS) {
+        linkPotBase[c] = potRaw[c];
+      } else if (abs(potRaw[c] - linkPotBase[c]) > LINK_TAKEOVER_RAW) {
+        linkHold[c] = false;
       }
     }
 
@@ -800,6 +1010,7 @@ void loop() {
                    potRaw[CH_IRIS], potRaw[CH_COLOR],
                    potRaw[CH_BRIGHTNESS], potRaw[CH_VOLUME]);
 
-    for (uint8_t i = 0; i < 4; i++) drawBar(i);
+    for (uint8_t i = 0; i < NUM_BARS; i++) drawBar(i);
+    for (uint8_t k = 0; k < 8; k++)        drawFaceNumber(k);
   }
 }
