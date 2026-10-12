@@ -44,7 +44,7 @@ Where the pot values go from there:
 | D6 | GPIO43 | UART TX to TTGO GPIO26 |
 | D7 | GPIO44 | UART RX from TTGO GPIO25 (face values, messages, face store) |
 | D8 | GPIO7 | TFT SCLK |
-| D9 | GPIO8 | TFT MISO |
+| D9 | GPIO8 | microSD MISO (SD_MISO only; display MISO/SDO left unconnected) |
 | D10 | GPIO9 | TFT MOSI |
 
 ## Pin diagram
@@ -59,7 +59,7 @@ read top-to-bottom as shown.
      TFT RST -- D1 (GP2) |  |    XIAO     |  | GND          ground
      TFT DC  -- D2 (GP3) |  |   ESP32-S3  |  | 3V3          TFT VCC + ADS1115 VDD
      TFT CS  -- D3 (GP4) |  |             |  | D10 (GP9)    TFT MOSI
-    I2C SDA  -- D4 (GP5) |  |             |  | D9  (GP8)    TFT MISO
+    I2C SDA  -- D4 (GP5) |  |             |  | D9  (GP8)    SD MISO only
     I2C SCL  -- D5 (GP6) |  |             |  | D8  (GP7)    TFT SCLK
 LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
               (GP43)        +-------------+
@@ -67,7 +67,9 @@ LINK TX -> TTGO 26 -- D6 |  |             |  | D7  (GP44)   LINK RX <- TTGO 25
    D4/D5 are the XIAO's native I2C pins -- the ADS1115 hangs there (addr 0x48).
    The TTGO->XIAO direction (D7) carries face values, messages and face storage.
    The microSD shares the TFT's SPI bus (D8/D9/D10) and takes only its own
-   chip select on D0. That pin is available because the display module's LED
+   chip select on D0. D9 (MISO) goes to SD_MISO ONLY: leave the display's
+   own MISO/SDO pin unconnected (the ILI9488 never releases it).
+   D0 is free for the SD chip select because the display module's LED
    pin is wired to 3.3V rather than driven, so TFT_BL is not defined at all.
 ```
 
@@ -119,7 +121,7 @@ The IRIS pot shares its function with fader_right on the controller
 | D2 (GPIO3) | DC |
 | D3 (GPIO4) | CS |
 | D8 (GPIO7) | SCK |
-| D9 (GPIO8) | MISO (SDO) |
+| **not connected** | MISO (SDO). Leave this pin unwired, see below |
 | D10 (GPIO9) | MOSI (SDI) |
 
 The microSD on the same module shares that SPI bus and adds one wire:
@@ -128,14 +130,18 @@ The microSD on the same module shares that SPI bus and adds one wire:
 |------|-------------|
 | D0 (GPIO1) | SD_CS |
 | D8 (GPIO7) | SD_SCK (same net as TFT SCK) |
-| D9 (GPIO8) | SD_MISO (same net as TFT MISO) |
+| D9 (GPIO8) | SD_MISO (the only thing on D9) |
 | D10 (GPIO9) | SD_MOSI (same net as TFT MOSI) |
 | 3V3 | VCC |
 | GND | GND |
 
 If the fitted module does not break out its SD pins, any SPI microSD breakout wires to the same six points with no firmware change.
 
-**If a FAT32 card never mounts** (USB serial keeps printing `microSD on CS=1: absent, will retry` with a card in the slot, and the controller's face saves end in "SD WRITE FAILED, KEPT IN CONTROLLER"), the likely cause is the panel's own MISO. On many ILI9488 modules the display's SDO pin does not release the line when its CS is high, so it fights the card on the shared MISO net. This firmware never reads from the panel, so the fix is to **disconnect the wire on the display's MISO/SDO pin** and keep only SD_MISO on D9. Nothing in the firmware changes. (The TFT bring-up diagnostic's ID readback is the only thing that uses the panel's MISO.)
+**Do not connect the display's MISO / SDO pin.** The ILI9488 never releases that line: its SDO keeps driving it even when the display's CS is high, so with it wired to D9 it fights the card's MISO and the card can never answer. TFT_eSPI's own setup template says so outright: *"Do not connect ILI9488 display SDO to MISO if other devices share the SPI bus (TFT SDO does NOT tristate when CS is high)"*. This firmware never reads from the panel, so nothing is lost by leaving it off. (Only the `diag-*` bring-up builds read the panel's ID, and they report all zeros without it, which is harmless.)
+
+The symptom with it connected: a known-good FAT32 card never mounts, power-on shows **NO SD CARD FOUND** in the header, USB serial prints `microSD: no answer`, and every face save ends **SD CARD NOT FOUND, CHECK WIRING**. With it disconnected, power-on shows **SD CARD OK** with the card type and size.
+
+If the card still is not found with the display's MISO off, check that the module's separate **SD header** (SD_CS, SD_MOSI, SD_MISO, SD_SCK, usually at the other end of the board from the display pins) is actually wired: the slot is not connected to the display's SPI pins on the board, so wiring only the display header leaves the card dead.
 
 ## Wiring to ADS1115
 

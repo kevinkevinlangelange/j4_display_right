@@ -123,6 +123,16 @@
 //                                    15s stale-message clear fired on the same pass. That
 //                                    is what made the OVERRIDE prompt flash and vanish.
 //                                    "now" is re-read after the link is drained.
+//                    2026-10-12 -KL  SD diagnostics. FACEERR now carries a reason,
+//                                    "FACEERR:<key>,N" (card did not answer: not wired,
+//                                    or the panel's SDO is fighting it on MISO) versus
+//                                    ",O"/",W" (card answered, file open/write failed),
+//                                    and the header shows the card's state for 6s at
+//                                    power-on ("SD CARD OK" + type and size, or "NO SD
+//                                    CARD FOUND"). Each mount attempt prints the result
+//                                    on USB serial. Wiring docs corrected: the display's
+//                                    own MISO/SDO must NOT be connected (TFT_eSPI: "TFT
+//                                    SDO does NOT tristate when CS is high").
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -239,6 +249,7 @@
 // unplugged). If the controller's "X:" is ever lost, the message self-clears.
 #define MSG_MAX_LEN          40   // per line
 #define MSG_SAFETY_CLEAR_MS  15000
+#define BOOT_SD_MSG_MS        6000   // power-on SD status stays this long
 
 
 // -----------------------------------------------------------------------------
@@ -497,6 +508,15 @@ String        linkBuf    = "";
 // pot feed for long. Returns false if there is no usable card, and every
 // caller treats that as "no store available" rather than an error worth
 // blocking on.
+const char *sdTypeName() {
+  switch (SD.cardType()) {
+    case CARD_MMC:  return "MMC";
+    case CARD_SD:   return "SD";
+    case CARD_SDHC: return "SDHC";
+    default:        return "UNKNOWN";
+  }
+}
+
 bool sdReady() {
   if (sd_mounted) return true;
 
@@ -508,8 +528,12 @@ bool sdReady() {
   // Hand SD the instance TFT_eSPI actually drives this bus with.
   if (SD.begin(SD_CS_PIN, tft.getSPIinstance(), SD_SPI_HZ)) {
     sd_mounted = true;
-    Serial.println(F("microSD mounted"));
+    Serial.printf("microSD mounted: %s, %llu MB\n", sdTypeName(), SD.cardSize() >> 20);
   } else {
+    // No answer from the card. With a known-good FAT32 card in the slot this
+    // is wiring: the SD_* pins not connected, or the display's own MISO/SDO
+    // wired to D9 as well (the ILI9488 never releases it). See the README.
+    Serial.println(F("microSD: no answer (check SD wiring; display MISO must be disconnected)"));
     SD.end();   // release so the next probe starts clean
   }
   return sd_mounted;
@@ -566,7 +590,9 @@ void facesSendDump() {
 void faceSaveToSD(const char *body) {
   char key = body[0];
 
-  if (!sdReady()) { Serial1.printf("FACEERR:%c\n", key); return; }
+  // Reason after the comma: N = no card answered, O = open failed, W = write
+  // failed. Controllers before v0_6_44 read only the key and ignore the rest.
+  if (!sdReady()) { Serial1.printf("FACEERR:%c,N\n", key); return; }
 
   // Slurp what is there, dropping any existing record for this key.
   static char keep[FACE_MAX][FACE_LINE_MAX + 1];
@@ -592,7 +618,7 @@ void faceSaveToSD(const char *body) {
   if (!out) {
     sd_mounted = false;             // card pulled or gone bad, re-probe later
     SD.end();
-    Serial1.printf("FACEERR:%c\n", key);
+    Serial1.printf("FACEERR:%c,O\n", key);
     return;
   }
   bool ok = true;
@@ -602,7 +628,8 @@ void faceSaveToSD(const char *body) {
   out.close();
 
   if (!ok) { sd_mounted = false; SD.end(); }
-  Serial1.printf(ok ? "FACEOK:%c\n" : "FACEERR:%c\n", key);
+  if (ok) Serial1.printf("FACEOK:%c\n", key);
+  else    Serial1.printf("FACEERR:%c,W\n", key);
 }
 
 
@@ -1028,8 +1055,21 @@ void setup() {
   // configured that bus first. A missing card is not an error here, sdReady()
   // keeps retrying every few seconds and the controller runs from its NVS
   // copy in the meantime.
+  bool sdOk = sdReady();
   Serial.printf("microSD on CS=%d: %s\n", SD_CS_PIN,
-                sdReady() ? "mounted" : "absent, will retry");
+                sdOk ? "mounted" : "absent, will retry");
+  // Say so on the screen too, for a few seconds, so the card can be checked
+  // without a USB cable. The controller's own messages replace this.
+  if (sdOk) {
+    strcpy(msgLine1, "SD CARD OK");
+    snprintf(msgLine2, sizeof(msgLine2), "%s, %llu MB", sdTypeName(), SD.cardSize() >> 20);
+  } else {
+    strcpy(msgLine1, "NO SD CARD FOUND");
+    strcpy(msgLine2, "CHECK SD WIRING, DISPLAY MISO OFF");
+  }
+  msgShown   = true;
+  msgShownAt = millis() - (MSG_SAFETY_CLEAR_MS - BOOT_SD_MSG_MS);   // clears in 6s
+  drawHeader();
 }
 
 
