@@ -1,6 +1,6 @@
 # j4_display_right
 
-Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar. The upper area shows the eight face pots read on the controller (Basket Eyebrow L/R, Eyebrow L/R, Bottom Eyelid L/R, Nose, Nose Basket), each with its 0-255 value and a bar, and the header strip shows the active face (**Face: A**, or **Face: A\*** once something has changed since it was saved) and face-preset messages such as **FACE SAVED TO A**.
+Pot-label display board for the Johnny 4 robot controller -- the landscape display on the RIGHT of the panel. It sits directly above four potentiometers and acts as an electronic label for them: the bottom of the screen reads **IRIS, COLOR, BRIGHTNESS, VOLUME** (left to right), each with a live value bar. The upper area shows the eight face pots read on the controller (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R), each with its 0-255 value and a bar, and the header strip shows the active face (**Face: A**, or **Face: A\*** once something has changed since it was saved) and face-preset messages such as **FACE SAVED TO A**.
 
 Since the controller's four ADS1115 ADCs have their channels allocated to the joysticks and face pots (with only spares left for the future 17th-19th pot readouts), this board carries the system's fifth ADS1115, which reads the four pots beneath it and immediately streams the values to the TTGO [j4_controller](https://github.com/kevinkevinlangelange/j4_controller) over UART.
 
@@ -278,19 +278,19 @@ Anything else is treated as line noise from a floating RX pin and ignored; the b
 ## Display layout (480 x 320 landscape)
 
 ```
-+---------------------------------------------------------+  y=0
-|    KEVCO / Face: A / Face: A* / a message (48px)        |  header strip
-+---------------------------------------------------------+  green line
-| BASKET BROW L | BASKET BROW R |  EYEBROW L | EYEBROW R   |
-|      123      |      123      |    123     |    123      |  face row 0 (92px)
-|     [bar]     |     [bar]     |   [bar]    |   [bar]     |
-| BTM EYELID L  | BTM EYELID R  |    NOSE    | NOSE BASKET |
-|      123      |      123      |    123     |    123      |  face row 1 (92px)
-|     [bar]     |     [bar]     |   [bar]    |   [bar]     |
-+---------------------------------------------------------+  dim line
-|    [bar]         [bar]         [bar]         [bar]      |  value bars (36px)
-|    IRIS          COLOR       BRIGHTNESS      VOLUME     |  labels (44px)
-+---------------------------------------------------------+  y=320
++-------------------------------------------------------------+  y=0
+|     KEVCO / Face: A / Face: A* / a message (48px)           |  header strip
++-------------------------------------------------------------+  green line
+|   EYEBROW L  |   EYEBROW R  | BASKET BROW L | BASKET BROW R |
+|      123     |      123     |      123      |      123      |  face row 0 (92px)
+|     [bar]    |     [bar]    |     [bar]     |     [bar]     |
+|     NOSE     |  NOSE BASKET | BTM EYELID L  | BTM EYELID R  |
+|      123     |      123     |      123      |      123      |  face row 1 (92px)
+|     [bar]    |     [bar]    |     [bar]     |     [bar]     |
++-------------------------------------------------------------+  dim line
+|     [bar]          [bar]          [bar]           [bar]     |  value bars (36px)
+|     IRIS           COLOR        BRIGHTNESS        VOLUME    |  labels (44px)
++-------------------------------------------------------------+  y=320
 ```
 
 The header strip shows **KEVCO** until a face is recalled or saved, then **Face: A** (with a `*` once anything has changed since that face was saved). It drops back to KEVCO if the controller goes quiet for a second.
@@ -299,7 +299,7 @@ Messages from the controller take the header strip's place while they are up: a 
 
 The face cells run in the order of `FACE_CELLS[]` in `main.cpp`; reorder that table if the physical pots sit differently.
 
-Each row of bars is rendered through its own `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB each, three in all: the bottom row and the two face rows). The face numbers are composed in one small 72 x 26 sprite over a copy of the background and pushed in one go. Nothing is ever composed on the glass, and nothing is redrawn unless its value changed.
+Each row of bars is rendered through its own `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB each, three in all: the bottom row and the two face rows). The face numbers (font 2, the same size as the labels) are composed in one small 72 x 26 sprite over a copy of the background and pushed in one go. Nothing is ever composed on the glass, and nothing is redrawn unless its value changed.
 
 Sizing that canvas to the band rather than the whole screen is deliberate, and so is pushing only part of it. The ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit and sends it through a per-pixel CPU loop (`pushPixels()` in `Processors/TFT_eSPI_ESP32_S3.c`), and the library's own README lists **ILI9488 (DMA not supported with SPI)**. Push cost is therefore strictly proportional to pixels sent, with no DMA to hide it, and the window in which the panel can be caught mid-update *is* the push duration. Pushing a whole-screen sprite every frame would lengthen that window, not shorten it.
 

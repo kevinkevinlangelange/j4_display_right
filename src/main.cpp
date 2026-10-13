@@ -133,6 +133,11 @@
 //                                    on USB serial. Wiring docs corrected: the display's
 //                                    own MISO/SDO must NOT be connected (TFT_eSPI: "TFT
 //                                    SDO does NOT tristate when CS is high").
+//                    2026-10-13 -KL  Face cells reordered: top row Eyebrow L/R, Basket
+//                                    Eyebrow L/R; bottom row Nose, Nose Basket, Bottom
+//                                    Eyelid L/R. Face numbers dropped from font 4 to
+//                                    font 2 (the label size). Cells are matched to
+//                                    values by FI index, so the controller is unchanged.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -432,7 +437,7 @@ unsigned long sdProbe_previousMillis = 0;
 
 // Number canvas: one small sprite reused for every face value.
 #define NUM_W  72
-#define NUM_H  26                            // font 4 height
+#define NUM_H  26                            // fits font 4; numbers now use font 2
 
 const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 
@@ -440,10 +445,10 @@ const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 // Reorder these to match the physical pots if they sit differently.
 struct FaceCell { const char *label; uint8_t fi; };
 const FaceCell FACE_CELLS[8] = {
-  { "BASKET BROW L", FI_BBROW_L }, { "BASKET BROW R", FI_BBROW_R },
   { "EYEBROW L",     FI_BROW_L  }, { "EYEBROW R",     FI_BROW_R  },
-  { "BTM EYELID L",  FI_LID_L   }, { "BTM EYELID R",  FI_LID_R   },
+  { "BASKET BROW L", FI_BBROW_L }, { "BASKET BROW R", FI_BBROW_R },
   { "NOSE",          FI_NOSE    }, { "NOSE BASKET",   FI_NOSE_BASKET },
+  { "BTM EYELID L",  FI_LID_L   }, { "BTM EYELID R",  FI_LID_R   },
 };
 
 // Bars 0-3 are the bottom row (CH_* order), 4-11 the face cells in
@@ -867,14 +872,14 @@ void drawFaceNumber(uint8_t k, bool force = false) {
     bgToPanel(nx, ny, NUM_W, NUM_H);
     tft.setTextColor(C_GREEN);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(txt, cx, ny + NUM_H / 2, 4);
+    tft.drawString(txt, cx, ny + NUM_H / 2, 2);
     tft.setTextDatum(TL_DATUM);
     return;
   }
   bgToSprite(numSpr, nx, ny, 0, 0, NUM_W, NUM_H);
   numSpr.setTextColor(C_GREEN);   // transparent over the background copy
   numSpr.setTextDatum(MC_DATUM);
-  numSpr.drawString(txt, NUM_W / 2, NUM_H / 2, 4);
+  numSpr.drawString(txt, NUM_W / 2, NUM_H / 2, 2);
   tft.startWrite();
   numSpr.pushSprite(nx, ny);
   tft.endWrite();
