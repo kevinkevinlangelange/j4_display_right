@@ -138,6 +138,9 @@
 //                                    Eyelid L/R. Face numbers dropped from font 4 to
 //                                    font 2 (the label size). Cells are matched to
 //                                    values by FI index, so the controller is unchanged.
+//                    2026-10-13 -KL  Added the diag-sd environment (src/diag_sd/) to find
+//                                    out why the microSD will not mount. No change to this
+//                                    file's behaviour; build filter now excludes diag_sd/.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four

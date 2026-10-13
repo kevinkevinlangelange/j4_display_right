@@ -143,6 +143,8 @@ The symptom with it connected: a known-good FAT32 card never mounts, power-on sh
 
 If the card still is not found with the display's MISO off, check that the module's separate **SD header** (SD_CS, SD_MOSI, SD_MISO, SD_SCK, usually at the other end of the board from the display pins) is actually wired: the slot is not connected to the display's SPI pins on the board, so wiring only the display header leaves the card dead.
 
+**Card supply on a 3.3V feed (J1).** Most of these red 3.5" SPI modules put a 3.3V regulator between the VCC pin and the board, with a solder jumper marked **J1** on the back to bypass it. Fed 5V, the regulator makes 3.3V and J1 stays open. Fed 3.3V (as here), the regulator drops the rail to roughly 2.5-3.0V: the panel still lights and draws normally, but the microSD needs 2.7-3.6V and may never answer. If the module has J1, short it (a blob of solder across the pads) **only while VCC is fed 3.3V**; never feed 5V with J1 shorted. To check without soldering, measure between the card slot's VCC and GND (or the regulator's output pin) with a meter: about 3.3V is fine, under 3.0V is this problem. See "microSD diagnostic" below to confirm.
+
 ## Wiring to ADS1115
 
 | ADS1115 | Connect to |
@@ -380,6 +382,18 @@ Interpreting the result, also printed to serial at the end of each cycle:
 Once the panel is identified, carry the working driver and any colour-order or inversion flag into the `[env:xiao-esp32s3]` `build_flags`.
 
 Note on library configuration: TFT_eSPI here is configured entirely by `build_flags`, with no `User_Setup.h`. If those flags failed to reach the library's own translation units the library would silently fall back to its default driver and pins, which produces exactly this blank-panel symptom. They do reach it: the three diag environments build to three different binaries (285440, 287904 and 285360 bytes for ILI9488, ST7796 and ILI9486), which is only possible if `-D<driver>_DRIVER` is changing the compiled library. Worth re-checking with `md5sum .pio/build/diag-*/firmware.bin` after any PlatformIO or TFT_eSPI upgrade.
+
+## microSD diagnostic
+
+When power-on keeps showing **NO SD CARD FOUND**, flash the `diag-sd` environment (PlatformIO: Project Tasks > diag-sd > Upload and Monitor). It needs only the XIAO and the TFT module, never draws on the panel (the screen stays blank or white), and repeats three tests every 4 seconds on USB serial:
+
+| Line | What it tests | Reading the result |
+|---|---|---|
+| `[1] MISO (D9) idle` | D9 read with the ESP32's pull-up, then pull-down, with both chip selects high | `1, 0` or `1, 1` is fine. `0, 0` means something holds MISO low while deselected: the display's MISO/SDO is still wired, or D9 is shorted to GND |
+| `[2] Raw CMD0 reply` | 80 wake-up clocks, then the card's first two commands at 250 kHz, with no library involved | `0x01` = card powered, wired and answering. `0xFF` = no answer at all: an SD_* wire missing or on the wrong pin, no card, or no card power (J1). `0x00` = MISO held low. Anything else = garbled: loose or crossed MOSI/MISO, long jumpers, or low card voltage |
+| `[3] SD.begin` | The SD library's mount at 400 kHz, 1 MHz and 4 MHz (the normal firmware uses 4 MHz), plus a root listing | Mounting only at the slower speeds points at long or loose wires. "card answered, but no FAT32 filesystem" means reformat FAT32 (Windows will not offer FAT32 over 32 GB; use a 32 GB or smaller card or a FAT32 tool) |
+
+The loop keeps running, so cards can be swapped and wires fixed while watching the output. Flash `xiao-esp32s3` again afterwards to get the normal firmware back.
 
 ## Related projects
 
