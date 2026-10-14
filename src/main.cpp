@@ -141,6 +141,7 @@
 //                    2026-10-13 -KL  Added the diag-sd environment (src/diag_sd/) to find
 //                                    out why the microSD will not mount. No change to this
 //                                    file's behaviour; build filter now excludes diag_sd/.
+//                    2026-10-13 -KL  Pin comment fixed: D9 is SD MISO only, not TFT MISO.
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -188,7 +189,7 @@
 //      D7 / GPIO44  LINK RX  ←  TTGO GPIO25  (TTGO TX, values, messages,
 //                                             face store requests)
 //      D8 / GPIO7   TFT SCLK + microSD SCK
-//      D9 / GPIO8   TFT MISO + microSD MISO
+//      D9 / GPIO8   microSD MISO only (display MISO/SDO stays unconnected)
 //      D10 / GPIO9  TFT MOSI + microSD MOSI
 //      GND          GND (shared with TTGO GND)
 //      ------------------------------------------------------------------
