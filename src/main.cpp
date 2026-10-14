@@ -142,6 +142,15 @@
 //                                    out why the microSD will not mount. No change to this
 //                                    file's behaviour; build filter now excludes diag_sd/.
 //                    2026-10-13 -KL  Pin comment fixed: D9 is SD MISO only, not TFT MISO.
+//                    2026-10-13 -KL  SCREEN TUNING block: every position, size, font and
+//                                    colour on the screen is now a named value in one
+//                                    place, with face bars and bottom bars sized
+//                                    separately and X/Y nudges per item. Background
+//                                    blits clip to the screen so an over-pushed value
+//                                    clips instead of reading past the image. Defaults
+//                                    reproduce the previous layout, except that a full
+//                                    bar now fills its outline exactly at 255 (it
+//                                    used to reach the end at about 243).
 //           author:  Kevin Lange
 //      description:  Pot-label display for the Johnny 4 controller (the landscape
 //                    display on the RIGHT of the panel). Sits directly above four
@@ -395,53 +404,114 @@ bool          sd_probedOnce = false;
 unsigned long sdProbe_previousMillis = 0;
 
 
-// -----------------------------------------------------------------------------
-//  COLOR PALETTE (matches j4_display_left)
-// -----------------------------------------------------------------------------
-#define C_BG     TFT_BLACK
+// =============================================================================
+//  SCREEN TUNING  (480 x 320 landscape)
+//
+//  Every position, size, font and colour on the screen is set here and only
+//  here. Edit a number, rebuild, flash, look.
+//
+//  - Units are pixels. (0, 0) is the top-left corner; y grows DOWN.
+//  - "_Y" values are absolute screen rows (0 = top edge, 319 = bottom edge).
+//  - "_DX" / "_DY" are nudges: +DX moves right, -DX left, +DY down, -DY up.
+//  - Text positions are the CENTRE of the text.
+//  - The screen is four columns, each COL_W (120) wide. Everything in a cell
+//    is centred on its column, then nudged by its DX. One DX moves that item
+//    in all four columns together.
+//  - Fonts are TFT_eSPI built-ins. Loaded here: 1 (8px), 2 (16px), 4 (26px),
+//    6 (48px), 7 (48px 7-segment), 8 (75px). Fonts 6, 7 and 8 have digits
+//    only (no letters, no "*"), so they suit the face numbers at most, and
+//    the "changed" star will not show in them.
+//  - Each item is erased by repainting the background under a fixed box,
+//    so don't let two items overlap or one will wipe part of the other.
+//  - Things pushed off the edge of the screen are clipped, not crashed.
+//
+//  The ORDER of the eight face cells is FACE_CELLS[] just below this block.
+// =============================================================================
+
+// ---- Colours (RGB565). Pick from TFT_eSPI's TFT_* names or mix your own:
+//      0xRRRR_RGGG_GGGB_BBBB, e.g. 0x4208 dark grey, 0xFFE0 yellow.
+#define C_BG     TFT_BLACK   // only seen if the background image is missing
 #define C_GREEN  TFT_GREEN
 #define C_DIM    0x4208      // dark grey
-#define C_HEADER 0x1082      // very dark blue
 
+// ---- Whole screen
+#define SCREEN_W         480
+#define SCREEN_H         320
+#define SCREEN_ROTATION  3       // 3 or 1: flip to 1 if the picture is upside down
+#define COL_W            (SCREEN_W / 4)
 
-// -----------------------------------------------------------------------------
-//  LAYOUT  (480 x 320 landscape)
-//  If the display appears upside down, change setRotation(3) to setRotation(1).
-// -----------------------------------------------------------------------------
-#define SCREEN_W  480
-#define SCREEN_H  320
+// ---- Header strip (top): KEVCO, "Face: A", or a controller message
+#define HDR_H            48      // strip height; the green line is drawn at this row
+#define HDR_LINE_COLOR   C_GREEN
+#define HDR_FONT         4       // KEVCO, "Face: A", one-line messages, message line 1
+#define HDR_TEXT_COLOR   C_GREEN
+#define HDR_TEXT_DX      0
+#define HDR_TEXT_Y       24      // KEVCO / "Face: A" / one-line message
+#define HDR_MSG1_Y       17      // two-line message, first line ("FACE SAVED TO A")
+#define HDR_MSG2_Y       39      // two-line message, second line ("SD CARD OK")
+#define HDR_MSG2_FONT    2
+#define HDR_MSG2_COLOR   TFT_WHITE
 
-#define HDR_Y       0
-#define HDR_H      48                        // KEVCO, or the current message
+// ---- Face grid (middle): two rows of four cells, each a label, a number, a bar
+#define FACE_ROW0_Y      52      // top of the upper row
+#define FACE_ROW_H       92      // row height = distance from one row's top to the next
+#define FACE_LBL_FONT    2       // "EYEBROW L" etc.
+#define FACE_LBL_COLOR   C_GREEN
+#define FACE_LBL_DX      0
+#define FACE_LBL_DY      12      // label centre, below the top of its row
+#define FACE_NUM_FONT    2       // the 0-255 value
+#define FACE_NUM_COLOR   C_GREEN
+#define FACE_NUM_DX      0
+#define FACE_NUM_DY      40      // number centre, below the top of its row
+#define FACE_NUM_BOX_W   72      // box each number is erased and redrawn in. Text
+#define FACE_NUM_BOX_H   26      //   bigger than this gets clipped: grow these with the font
+#define FACE_BAR_W       84      // bar outline width
+#define FACE_BAR_H       20      // bar outline height
+#define FACE_BAR_DX      0
+#define FACE_BAR_DY      60      // top of the bar outline, below the top of its row
+#define FACE_DIV_COLOR   C_DIM   // lines between cells and between the two rows
+#define FACE_DIV_INSET   4       // cell dividers stop this short of the row top and bottom
+#define FACE_ROWLINE_INSET 12    // line between the rows stops this far from each side
 
-#define LBL_H      44                        // label strip at the very bottom
-#define LBL_Y      (SCREEN_H - LBL_H)
-#define BAR_H      36                        // value bars above the labels
-#define BAR_Y      (LBL_Y - BAR_H)
-#define CELL_W     (SCREEN_W / 4)            // 120px per cell
+// ---- Bottom row: IRIS, COLOR, BRIGHTNESS, VOLUME
+#define BOT_LINE_Y       238     // dim line across the screen above the bottom bars
+#define BOT_LINE_COLOR   C_DIM
+#define BOT_BAR_W        84      // bar outline width
+#define BOT_BAR_H        20      // bar outline height
+#define BOT_BAR_DX       0
+#define BOT_BAR_Y        248     // top of the bar outline
+#define BOT_LBL_FONT     2
+#define BOT_LBL_COLOR    C_GREEN
+#define BOT_LBL_DX       0
+#define BOT_LBL_Y        298     // label centre
+#define BOT_LBL_BOX_H    44      // strip erased when a label's "*" changes; must cover the text
+#define BOT_DIV_COLOR    C_DIM
+#define BOT_DIV_Y        282     // top of the dividers between the labels
+#define BOT_DIV_H        32      // divider length (0 = no dividers)
 
-#define BAR_PAD    18                        // bar inset from the cell edges
-#define BAR_INNER  (CELL_W - 2 * BAR_PAD)    // drawable bar width
+// ---- Bars (both rows)
+#define BAR_OUTLINE_COLOR C_DIM
+#define BAR_FILL_COLOR    C_GREEN
+#define BAR_FILL_INSET    2      // gap between the outline and the green fill, every side
 
-// Every bar lives in a 480 x 20 band sprite, one sprite per row of bars, and
-// pushes come out of it.
-#define BAR_BAND_H  (BAR_H - 16)             // 20px, outline included
-#define BAR_FILL_Y  2                        // fill inset inside the band
-#define BAR_FILL_H  (BAR_H - 20)             // 16px of green/background
-#define BOT_BAND_Y  (BAR_Y + 8)              // bottom band top on the panel
+// Each bar row is drawn through a full-width sprite of SCREEN_W x bar height
+// (16bpp, so 960 bytes per pixel of height, three rows). Very tall bars may not
+// fit in RAM; the row then draws straight to the panel (USB serial says
+// "FAILED, drawing direct") and only tears a little when a pot is swept.
 
-// Face pot grid: two rows of four cells between the header and the bottom
-// bars. Offsets are from the top of each row.
-#define FACE_Y0        (HDR_H + 4)           // 52
-#define FACE_ROW_H     92                    // two rows end at 236
-#define FACE_LBL_DY    12                    // label centre
-#define FACE_NUM_DY    40                    // number centre
-#define FACE_BAND_DY   60                    // bar band top
-#define FACE_ROW_Y(r)  (FACE_Y0 + (r) * FACE_ROW_H)
+static_assert(FACE_BAR_W > 2 * BAR_FILL_INSET && FACE_BAR_H > 2 * BAR_FILL_INSET,
+              "FACE_BAR_W/H must be bigger than twice BAR_FILL_INSET");
+static_assert(BOT_BAR_W  > 2 * BAR_FILL_INSET && BOT_BAR_H  > 2 * BAR_FILL_INSET,
+              "BOT_BAR_W/H must be bigger than twice BAR_FILL_INSET");
+static_assert(FACE_NUM_BOX_W > 0 && FACE_NUM_BOX_H > 0 && BOT_LBL_BOX_H > 0,
+              "box sizes must be positive");
+// =============================================================================
+//  END OF SCREEN TUNING
+// =============================================================================
 
-// Number canvas: one small sprite reused for every face value.
-#define NUM_W  72
-#define NUM_H  26                            // fits font 4; numbers now use font 2
+// Derived from the tuning above. Nothing to edit below this line.
+#define COL_CX(c)       ((c) * COL_W + COL_W / 2)          // column centre
+#define FACE_ROW_Y(r)   (FACE_ROW0_Y + (r) * FACE_ROW_H)    // top of face row r
 
 const char *POT_LABELS[4] = { "IRIS", "COLOR", "BRIGHTNESS", "VOLUME" };
 
@@ -461,6 +531,19 @@ const FaceCell FACE_CELLS[8] = {
 #define NUM_BANDS   3
 static inline uint8_t barBand(uint8_t i) { return i < 4 ? 0 : (i < 8 ? 1 : 2); }
 static inline uint8_t barCol(uint8_t i)  { return i < 4 ? i : (i - 4) % 4; }
+
+// Keeps a box of size h (or w) on the screen, so a tuning value pushed too far
+// clips the item at the edge instead of reading past the background image.
+static constexpr int16_t keepOn(int16_t v, int16_t size, int16_t limit) {
+  return v < 0 ? 0 : (v + size > limit ? limit - size : v);
+}
+static inline int16_t barW(uint8_t i)    { return i < 4 ? BOT_BAR_W : FACE_BAR_W; }
+static inline int16_t barX(uint8_t i) {
+  return keepOn(COL_CX(barCol(i)) - barW(i) / 2 + (i < 4 ? BOT_BAR_DX : FACE_BAR_DX),
+                barW(i), SCREEN_W);
+}
+// Widest the green fill can get inside the outline.
+static inline int16_t barFillMax(uint8_t i) { return barW(i) - 2 * BAR_FILL_INSET; }
 
 
 // -----------------------------------------------------------------------------
@@ -483,9 +566,10 @@ TFT_eSprite bandBot   = TFT_eSprite(&tft);
 TFT_eSprite bandFace0 = TFT_eSprite(&tft);
 TFT_eSprite bandFace1 = TFT_eSprite(&tft);
 TFT_eSprite  *bandSpr[NUM_BANDS] = { &bandBot, &bandFace0, &bandFace1 };
-const int16_t bandY[NUM_BANDS]   = { BOT_BAND_Y,
-                                     FACE_ROW_Y(0) + FACE_BAND_DY,
-                                     FACE_ROW_Y(1) + FACE_BAND_DY };
+const int16_t bandH[NUM_BANDS]   = { BOT_BAR_H, FACE_BAR_H, FACE_BAR_H };
+const int16_t bandY[NUM_BANDS]   = { keepOn(BOT_BAR_Y, BOT_BAR_H, SCREEN_H),
+                                     keepOn(FACE_ROW_Y(0) + FACE_BAR_DY, FACE_BAR_H, SCREEN_H),
+                                     keepOn(FACE_ROW_Y(1) + FACE_BAR_DY, FACE_BAR_H, SCREEN_H) };
 bool          bandOk[NUM_BANDS]  = { false, false, false };  // false = draw direct
 
 TFT_eSprite numSpr   = TFT_eSprite(&tft);
@@ -664,7 +748,17 @@ void faceSaveToSD(const char *body) {
 //
 // With no image generated yet this is a flat fill and the display behaves as
 // it did before the background existed.
+// Trims a box to the screen. false = nothing of it is on the screen.
+static bool clipToScreen(int16_t &x, int16_t &y, int16_t &w, int16_t &h) {
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > SCREEN_W) w = SCREEN_W - x;
+  if (y + h > SCREEN_H) h = SCREEN_H - y;
+  return w > 0 && h > 0;
+}
+
 void bgToPanel(int16_t x, int16_t y, int16_t w, int16_t h) {
+  if (!clipToScreen(x, y, w, h)) return;
 #if HAVE_BG
   bool oldSwap = tft.getSwapBytes();
   tft.setSwapBytes(false);
@@ -688,6 +782,10 @@ void bgToPanel(int16_t x, int16_t y, int16_t w, int16_t h) {
 // swapBytes false so each row is a straight memcpy.
 static void bgToSprite(TFT_eSprite &spr, int16_t sx, int16_t sy,
                        int16_t x, int16_t y, int16_t w, int16_t h) {
+  int16_t px = sx + x, py = sy + y;   // same box in panel coordinates
+  if (!clipToScreen(px, py, w, h)) return;
+  x = px - sx;
+  y = py - sy;
 #if HAVE_BG
   for (int16_t r = 0; r < h; r++)
     spr.pushImage(x, y + r, w, 1,
@@ -722,17 +820,18 @@ void drawHeader(bool force = false) {
   if (!force && strcmp(want, hdrShown) == 0) return;
   strcpy(hdrShown, want);
 
-  bgToPanel(0, HDR_Y, SCREEN_W, HDR_H);
-  tft.setTextColor(C_GREEN);   // single argument = transparent, keeps the image
+  int16_t cx = SCREEN_W / 2 + HDR_TEXT_DX;
+  bgToPanel(0, 0, SCREEN_W, HDR_H);
+  tft.setTextColor(HDR_TEXT_COLOR);   // single argument = transparent, keeps the image
   tft.setTextDatum(MC_DATUM);
   if (!msgShown) {
-    tft.drawString(faceTxt[0] ? faceTxt : "KEVCO", SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+    tft.drawString(faceTxt[0] ? faceTxt : "KEVCO", cx, HDR_TEXT_Y, HDR_FONT);
   } else if (msgLine2[0] == '\0') {
-    tft.drawString(msgLine1, SCREEN_W / 2, HDR_Y + HDR_H / 2, 4);
+    tft.drawString(msgLine1, cx, HDR_TEXT_Y, HDR_FONT);
   } else {
-    tft.drawString(msgLine1, SCREEN_W / 2, HDR_Y + 17, 4);
-    tft.setTextColor(TFT_WHITE);
-    tft.drawString(msgLine2, SCREEN_W / 2, HDR_Y + 39, 2);
+    tft.drawString(msgLine1, cx, HDR_MSG1_Y, HDR_FONT);
+    tft.setTextColor(HDR_MSG2_COLOR);
+    tft.drawString(msgLine2, cx, HDR_MSG2_Y, HDR_MSG2_FONT);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -749,15 +848,14 @@ void drawLabels(bool force = false) {
   uint8_t stars = labelStars();
   if (!force && stars == lblStars) return;
   lblStars = stars;
-  bgToPanel(0, LBL_Y, SCREEN_W, LBL_H);
+  bgToPanel(0, BOT_LBL_Y - BOT_LBL_BOX_H / 2, SCREEN_W, BOT_LBL_BOX_H);
   tft.setTextDatum(MC_DATUM);
   for (uint8_t i = 0; i < 4; i++) {
-    int16_t cx = i * CELL_W + CELL_W / 2;
     char lbl[16];
     snprintf(lbl, sizeof(lbl), "%s%s", POT_LABELS[i], (stars >> i) & 1 ? "*" : "");
-    tft.setTextColor(C_GREEN);   // transparent, so the image shows behind
-    tft.drawString(lbl, cx, LBL_Y + LBL_H / 2, 2);
-    if (i > 0) tft.drawFastVLine(i * CELL_W, LBL_Y + 6, LBL_H - 12, C_DIM);
+    tft.setTextColor(BOT_LBL_COLOR);   // transparent, so the image shows behind
+    tft.drawString(lbl, COL_CX(i) + BOT_LBL_DX, BOT_LBL_Y, BOT_LBL_FONT);
+    if (i > 0 && BOT_DIV_H > 0) tft.drawFastVLine(i * COL_W, BOT_DIV_Y, BOT_DIV_H, BOT_DIV_COLOR);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -768,12 +866,15 @@ void drawFaceLabels() {
   tft.setTextDatum(MC_DATUM);
   for (uint8_t k = 0; k < 8; k++) {
     uint8_t r  = k / 4, c = k % 4;
-    int16_t cx = c * CELL_W + CELL_W / 2;
-    tft.setTextColor(C_GREEN);
-    tft.drawString(FACE_CELLS[k].label, cx, FACE_ROW_Y(r) + FACE_LBL_DY, 2);
-    if (c > 0) tft.drawFastVLine(c * CELL_W, FACE_ROW_Y(r) + 4, FACE_ROW_H - 8, C_DIM);
+    tft.setTextColor(FACE_LBL_COLOR);
+    tft.drawString(FACE_CELLS[k].label, COL_CX(c) + FACE_LBL_DX,
+                   FACE_ROW_Y(r) + FACE_LBL_DY, FACE_LBL_FONT);
+    if (c > 0 && FACE_ROW_H > 2 * FACE_DIV_INSET)
+      tft.drawFastVLine(c * COL_W, FACE_ROW_Y(r) + FACE_DIV_INSET,
+                        FACE_ROW_H - 2 * FACE_DIV_INSET, FACE_DIV_COLOR);
   }
-  tft.drawFastHLine(12, FACE_ROW_Y(1) - 1, SCREEN_W - 24, C_DIM);
+  tft.drawFastHLine(FACE_ROWLINE_INSET, FACE_ROW_Y(1) - 1,
+                    SCREEN_W - 2 * FACE_ROWLINE_INSET, FACE_DIV_COLOR);
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -789,15 +890,16 @@ static int16_t faceValNow(uint8_t fi) {
 // Fill width for one bar, already clamped to what a bar can show.
 static int16_t barFillPx(uint8_t i) {
   int32_t px;
+  int32_t full = barFillMax(i);
   if (i >= 4) {
     int16_t v = faceValNow(FACE_CELLS[i - 4].fi);
-    px = v < 0 ? 0 : (int32_t)v * BAR_INNER / LINK_VAL_MAX;
+    px = v < 0 ? 0 : (int32_t)v * full / LINK_VAL_MAX;
   } else if (i < 3 && linkHold[i]) {
-    px = (int32_t)constrain(linkVal[i], 0, LINK_VAL_MAX) * BAR_INNER / LINK_VAL_MAX;
+    px = (int32_t)constrain(linkVal[i], 0, LINK_VAL_MAX) * full / LINK_VAL_MAX;
   } else {
-    px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * BAR_INNER / POT_RAW_MAX;
+    px = (int32_t)constrain(potRaw[i], 0, POT_RAW_MAX) * full / POT_RAW_MAX;
   }
-  return (int16_t)constrain(px, 0, BAR_INNER - 4);
+  return (int16_t)constrain(px, 0, full);
 }
 
 
@@ -817,23 +919,29 @@ void drawBar(uint8_t i, bool force = false) {
   if (!force && fill == prev) return;   // unchanged, nothing to send
   barPx[i] = fill;
 
-  uint8_t      b   = barBand(i);
-  TFT_eSprite &spr = *bandSpr[b];
-  int16_t      by  = bandY[b];
-  int16_t      bx  = barCol(i) * CELL_W + BAR_PAD;   // same x on panel and band
+  uint8_t      b    = barBand(i);
+  TFT_eSprite &spr  = *bandSpr[b];
+  int16_t      by   = bandY[b];
+  int16_t      bh   = bandH[b];
+  int16_t      bw   = barW(i);
+  int16_t      bx   = barX(i);                 // same x on panel and band
+  int16_t      fx   = bx + BAR_FILL_INSET;     // fill area inside the outline
+  int16_t      fy   = BAR_FILL_INSET;          //   (fy is band-relative)
+  int16_t      fh   = bh - 2 * BAR_FILL_INSET;
+  int16_t      fmax = barFillMax(i);
 
   if (!bandOk[b]) {
     // Sprite allocation failed. Draw straight to the panel: it tears, but the
     // display stays usable rather than going blank.
-    tft.drawRect(bx, by, BAR_INNER, BAR_BAND_H, C_DIM);
-    tft.fillRect(bx + 2, by + BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
-    bgToPanel(bx + 2 + fill, by + BAR_FILL_Y, BAR_INNER - 4 - fill, BAR_FILL_H);
+    tft.drawRect(bx, by, bw, bh, BAR_OUTLINE_COLOR);
+    tft.fillRect(fx, by + fy, fill, fh, BAR_FILL_COLOR);
+    bgToPanel(fx + fill, by + fy, fmax - fill, fh);
     return;
   }
 
   // Compose into the canvas. No panel traffic in this part.
-  spr.fillRect(bx + 2, BAR_FILL_Y, fill, BAR_FILL_H, C_GREEN);
-  bgToSprite(spr, 0, by, bx + 2 + fill, BAR_FILL_Y, BAR_INNER - 4 - fill, BAR_FILL_H);
+  spr.fillRect(fx, fy, fill, fh, BAR_FILL_COLOR);
+  bgToSprite(spr, 0, by, fx + fill, fy, fmax - fill, fh);
 
   // startWrite()/endWrite() wrap every push. The windowed pushSprite() renders
   // line by line and, unlike its 1bpp and 4bpp branches, its 16bpp branch does
@@ -841,15 +949,14 @@ void drawBar(uint8_t i, bool force = false) {
   // row would be its own SPI transaction with its own window command.
   tft.startWrite();
   if (force || prev < 0) {
-    spr.drawRect(bx, 0, BAR_INNER, BAR_BAND_H, C_DIM);
-    spr.pushSprite(bx, by, bx, 0, BAR_INNER, BAR_BAND_H);
+    spr.drawRect(bx, 0, bw, bh, BAR_OUTLINE_COLOR);
+    spr.pushSprite(bx, by, bx, 0, bw, bh);
   } else {
     // Only the columns between the old and new fill edges differ. The outline
     // is static and sits outside the fill rows, so it never needs resending.
     int16_t lo = prev < fill ? prev : fill;
     int16_t hi = prev < fill ? fill : prev;
-    spr.pushSprite(bx + 2 + lo, by + BAR_FILL_Y,
-                   bx + 2 + lo, BAR_FILL_Y, hi - lo, BAR_FILL_H);
+    spr.pushSprite(fx + lo, by + fy, fx + lo, fy, hi - lo, fh);
   }
   tft.endWrite();
 }
@@ -868,22 +975,23 @@ void drawFaceNumber(uint8_t k, bool force = false) {
   if (v < 0) strcpy(txt, "--");
   else       snprintf(txt, sizeof(txt), "%d%s", v, star ? "*" : "");
 
-  int16_t cx = (k % 4) * CELL_W + CELL_W / 2;
-  int16_t nx = cx - NUM_W / 2;
-  int16_t ny = FACE_ROW_Y(k / 4) + FACE_NUM_DY - NUM_H / 2;
+  int16_t cx = COL_CX(k % 4) + FACE_NUM_DX;
+  int16_t cy = FACE_ROW_Y(k / 4) + FACE_NUM_DY;
+  int16_t nx = cx - FACE_NUM_BOX_W / 2;
+  int16_t ny = cy - FACE_NUM_BOX_H / 2;
 
   if (!numSprOk) {
-    bgToPanel(nx, ny, NUM_W, NUM_H);
-    tft.setTextColor(C_GREEN);
+    bgToPanel(nx, ny, FACE_NUM_BOX_W, FACE_NUM_BOX_H);
+    tft.setTextColor(FACE_NUM_COLOR);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(txt, cx, ny + NUM_H / 2, 2);
+    tft.drawString(txt, cx, cy, FACE_NUM_FONT);
     tft.setTextDatum(TL_DATUM);
     return;
   }
-  bgToSprite(numSpr, nx, ny, 0, 0, NUM_W, NUM_H);
-  numSpr.setTextColor(C_GREEN);   // transparent over the background copy
+  bgToSprite(numSpr, nx, ny, 0, 0, FACE_NUM_BOX_W, FACE_NUM_BOX_H);
+  numSpr.setTextColor(FACE_NUM_COLOR);   // transparent over the background copy
   numSpr.setTextDatum(MC_DATUM);
-  numSpr.drawString(txt, NUM_W / 2, NUM_H / 2, 2);
+  numSpr.drawString(txt, FACE_NUM_BOX_W / 2, FACE_NUM_BOX_H / 2, FACE_NUM_FONT);
   tft.startWrite();
   numSpr.pushSprite(nx, ny);
   tft.endWrite();
@@ -999,9 +1107,9 @@ void handleLinkLine(const String &line) {
 void drawScreen() {
   bgToPanel(0, 0, SCREEN_W, SCREEN_H);
   drawHeader(true);
-  tft.drawFastHLine(0, HDR_H, SCREEN_W, C_GREEN);
+  tft.drawFastHLine(0, HDR_H, SCREEN_W, HDR_LINE_COLOR);
   drawFaceLabels();
-  tft.drawFastHLine(0, BAR_Y - 2, SCREEN_W, C_DIM);
+  tft.drawFastHLine(0, BOT_LINE_Y, SCREEN_W, BOT_LINE_COLOR);
   drawLabels(true);
   for (uint8_t i = 0; i < NUM_BARS; i++) drawBar(i, true);
   for (uint8_t k = 0; k < 8; k++) drawFaceNumber(k, true);
@@ -1031,7 +1139,7 @@ void setup() {
   // No backlight pin to drive: the module's LED is strapped to 3.3V, and this
   // board's GPIO1 is the microSD chip select instead.
   tft.init();
-  tft.setRotation(3);    // landscape 480x320; change to 1 if upside down
+  tft.setRotation(SCREEN_ROTATION);   // see SCREEN TUNING
   // One-off clear of the panel's power-on garbage. drawScreen() paints the
   // background image over all of this at the end of setup, so this is a boot
   // frame only and never covers the image during operation.
@@ -1043,19 +1151,19 @@ void setup() {
   for (uint8_t b = 0; b < NUM_BANDS; b++) {
     TFT_eSprite &spr = *bandSpr[b];
     spr.setColorDepth(16);
-    bandOk[b] = (spr.createSprite(SCREEN_W, BAR_BAND_H) != NULL);
+    bandOk[b] = (spr.createSprite(SCREEN_W, bandH[b]) != NULL);
     if (bandOk[b]) {
       // swapBytes false so pushImage into the sprite is a straight per-row
       // memcpy. The image is generated in sprite-native (byte-swapped) order,
       // so it drops straight in with no conversion.
       spr.setSwapBytes(false);
       spr.fillSprite(C_BG);   // known state if the image is ever missing
-      bgToSprite(spr, 0, bandY[b], 0, 0, SCREEN_W, BAR_BAND_H);
+      bgToSprite(spr, 0, bandY[b], 0, 0, SCREEN_W, bandH[b]);
     }
     Serial.printf("bar band %u sprite %s\n", b, bandOk[b] ? "ready" : "FAILED, drawing direct");
   }
   numSpr.setColorDepth(16);
-  numSprOk = (numSpr.createSprite(NUM_W, NUM_H) != NULL);
+  numSprOk = (numSpr.createSprite(FACE_NUM_BOX_W, FACE_NUM_BOX_H) != NULL);
   if (numSprOk) numSpr.setSwapBytes(false);
 
   drawScreen();

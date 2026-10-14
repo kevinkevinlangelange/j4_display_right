@@ -301,7 +301,29 @@ Messages from the controller take the header strip's place while they are up: a 
 
 The face cells run in the order of `FACE_CELLS[]` in `main.cpp`; reorder that table if the physical pots sit differently.
 
-Each row of bars is rendered through its own `TFT_eSprite` canvas 480 x 20 at 16bpp (19.2KB each, three in all: the bottom row and the two face rows). The face numbers (font 2, the same size as the labels) are composed in one small 72 x 26 sprite over a copy of the background and pushed in one go. Nothing is ever composed on the glass, and nothing is redrawn unless its value changed.
+### Tuning the layout
+
+Every position, size, font and colour on the screen is a named value in the **SCREEN TUNING** block near the top of `src/main.cpp`. Edit a number there, rebuild, flash, look; nothing else in the file needs touching. The block is grouped by area:
+
+| Group | Prefix | What it sets |
+|---|---|---|
+| Colours | `C_` | The palette the items below pick from |
+| Whole screen | `SCREEN_` | Rotation (3, or 1 if the picture is upside down) |
+| Header strip | `HDR_` | Strip height, font, colour and Y of KEVCO / "Face: A" / both message lines |
+| Face grid | `FACE_` | Top of the grid, row height, and for the label, number and bar: font, colour, X nudge, Y offset in the row, bar width and height, the number's box size, divider insets |
+| Bottom row | `BOT_` | Line above the bars, bar size and Y, label font, colour and Y, label dividers |
+| Bars | `BAR_` | Outline and fill colours, gap between outline and fill |
+
+Conventions: units are pixels, (0, 0) is the top-left, y grows down. `_Y` values are absolute rows; `_DX` / `_DY` are nudges (+DX right, +DY down). Text Y is the centre of the text. Each item sits centred on its quarter-screen column, so one `_DX` moves that item in all four columns. Face bars and bottom bars are sized independently.
+
+Things to know:
+- **Don't let two items overlap.** Each item is erased by repainting the background under its own box, so an overlapping neighbour gets part of itself wiped until the next full repaint.
+- **Bigger face numbers need a bigger box.** `FACE_NUM_BOX_W` / `FACE_NUM_BOX_H` is the area each number is erased and drawn in; text larger than it is clipped.
+- **Fonts 6, 7 and 8 are digits only**, so the "changed" `*` will not show in them.
+- **Values pushed off the screen clip at the edge**; they cannot crash the board.
+- **Very tall bars may not fit in RAM.** Each bar row is a full-width sprite (960 bytes per pixel of bar height). If one cannot be allocated, USB serial prints `bar band N sprite FAILED, drawing direct` and that row draws straight to the panel, which works but tears slightly when a pot is swept.
+
+Each row of bars is rendered through its own `TFT_eSprite` canvas, 480 wide by the bar height at 16bpp (19.2KB each at the default 20px, three in all: the bottom row and the two face rows). The face numbers are composed in one small sprite the size of `FACE_NUM_BOX_W` x `FACE_NUM_BOX_H` over a copy of the background and pushed in one go. Nothing is ever composed on the glass, and nothing is redrawn unless its value changed.
 
 Sizing that canvas to the band rather than the whole screen is deliberate, and so is pushing only part of it. The ILI9488 has no 16-bit SPI mode, so TFT_eSPI converts every pixel to 18-bit and sends it through a per-pixel CPU loop (`pushPixels()` in `Processors/TFT_eSPI_ESP32_S3.c`), and the library's own README lists **ILI9488 (DMA not supported with SPI)**. Push cost is therefore strictly proportional to pixels sent, with no DMA to hide it, and the window in which the panel can be caught mid-update *is* the push duration. Pushing a whole-screen sprite every frame would lengthen that window, not shorten it.
 
@@ -311,7 +333,7 @@ Pushes are wrapped in `startWrite()`/`endWrite()`. The windowed `pushSprite()` r
 
 If `createSprite()` ever fails, `drawBar()` falls back to drawing direct, which tears but keeps the display usable. Setup prints the sprite status over USB CDC.
 
-Each cell is a quarter of the screen width; the bottom row is centered above its pot. If the image is upside down relative to the panel, change `setRotation(3)` to `setRotation(1)` in `main.cpp`.
+Each cell is a quarter of the screen width; the bottom row is centered above its pot. If the image is upside down relative to the panel, change `SCREEN_ROTATION` from 3 to 1 in the SCREEN TUNING block.
 
 ## Dependencies
 
